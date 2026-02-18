@@ -1,0 +1,1766 @@
+-- ============================================================
+-- MELAYU-HUB — BY SIGMA
+-- Fly + Noclip for Herb/Treasure/Altar/Mob/Quest/Ability
+-- ============================================================
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+local Window = Rayfield:CreateWindow({
+   Name = "MELAYU-HUB", LoadingTitle = "BY SIGMA",
+   LoadingSubtitle = "LOADING...",
+   ConfigurationSaving = { Enabled = true, FileName = "MelayuHub" },
+   Discord = { Enabled = false }, KeySystem = false,
+})
+
+-- ============================================================
+-- SERVICES
+-- ============================================================
+local Players           = game:GetService("Players")
+local TweenService      = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService        = game:GetService("RunService")
+
+local Player    = Players.LocalPlayer
+local Character = Player.Character or Player.CharacterAdded:Wait()
+local HRP       = Character:WaitForChild("HumanoidRootPart")
+local Humanoid  = Character:WaitForChild("Humanoid")
+
+local flySpeed    = 150
+local mobDistance = 6
+local activeTween = nil
+local activeBV    = nil -- global BodyVelocity reference to stop fly instantly
+
+local herbActive     = false
+local treasureActive = false
+local altarActive    = false
+local mobActive      = false
+local questActive    = false
+local alchemyActive  = false
+
+-- Multi-farm priority (1 = highest). Saved via ConfigurationSaving
+local farmPriority = { herb = 3, treasure = 2, altar = 1 }
+local multiFarmThread = nil -- single coordinator thread for herb/treasure/altar
+
+local selectedHerb      = nil
+local selectedMob       = nil
+local selectedQuest     = nil
+local selectedTreasure  = {} -- table for multi-select
+local selectedBloodline = {} -- table for multi-select
+local questLoopEnabled  = false
+local justRespawned     = false
+
+-- ============================================================
+-- BOSS MOB CONFIG
+-- ============================================================
+local BOSS_MOBS = {"Zanshi Huo Ren", "Zanshi Bing Ren"}
+local bossFarmActive   = false
+local selectedBossMob  = BOSS_MOBS[1]
+
+local function notifyBossSpawn(mobName, alreadySpawned)
+    Rayfield:Notify({
+        Title   = "Mob Detected",
+        Content = mobName .. (alreadySpawned and " already spawned!" or " has spawned!"),
+        Duration= 6,
+        Image   = 4483362458,
+    })
+end
+
+-- Check if boss mobs already in workspace on load
+task.defer(function()
+    local folder = workspace:FindFirstChild("Enemies")
+    if not folder then return end
+    for _, bossName in ipairs(BOSS_MOBS) do
+        if folder:FindFirstChild(bossName) then
+            notifyBossSpawn(bossName, true)
+        end
+    end
+    -- Monitor future spawns
+    folder.ChildAdded:Connect(function(child)
+        for _, bossName in ipairs(BOSS_MOBS) do
+            if child.Name == bossName then
+                notifyBossSpawn(bossName, false)
+                break
+            end
+        end
+    end)
+end)
+
+local herbCollectCount      = 0
+local treasureCollectCount  = 0
+local altarCollectCount     = 0
+
+Player.CharacterAdded:Connect(function(c)
+    Character = c
+    HRP       = c:WaitForChild("HumanoidRootPart")
+    Humanoid  = c:WaitForChild("Humanoid")
+    justRespawned = true
+
+    -- Tunggu character fully loaded
+    task.wait(2)
+    justRespawned = false
+
+    -- Reset PlatformStand dan noclip state lepas respawn
+    if Humanoid then
+        Humanoid.PlatformStand = false
+        Humanoid.AutoRotate = true
+    end
+    if HRP then
+        HRP.AssemblyLinearVelocity = Vector3.zero
+    end
+
+    -- Resume noclip if a farm is active
+    if herbActive or treasureActive or altarActive or mobActive or questActive or harvestQuestActive or slayQuestActive or bossFarmActive then
+        noclipEnabled = true
+    end
+end)
+
+-- ============================================================
+-- FLY + NOCLIP SYSTEM
+-- ============================================================
+local noclipEnabled = false
+
+-- Noclip loop — repeat setiap frame sebab Roblox reset CanCollide
+local noclipConnection = RunService.Stepped:Connect(function()
+    if noclipEnabled and Character then
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end
+end)
+
+local function setNoclip(state)
+    noclipEnabled = state
+    if not state and Character then
+        for _, part in ipairs(Character:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = true
+            end
+        end
+    end
+end
+
+-- Fly straight ke targetPos, noclip kekal ON sampai caller off-kan
+local function flyTo(targetPos, activeCheck)
+    if not HRP or not Humanoid then return false end
+
+    Humanoid.PlatformStand = true
+    setNoclip(true)
+
+    local bv = Instance.new("BodyVelocity")
+    bv.MaxForce = Vector3.new(1e5, 1e5, 1e5)
+    bv.Velocity  = Vector3.zero
+    bv.Parent    = HRP
+    activeBV     = bv  -- store globally so stopFlyNoclip can kill instantly
+
+    local maxTime = 60
+    local t0      = tick()
+    local reached = false
+
+    while tick() - t0 < maxTime do
+        if activeCheck and not activeCheck() then break end
+        if not HRP or not HRP.Parent then break end
+        if not bv or not bv.Parent then break end -- already destroyed by stop
+
+        local currentPos = HRP.Position
+        local dist       = (targetPos - currentPos).Magnitude
+
+        if dist <= 3 then
+            reached = true
+            break
+        end
+
+        local dir = (targetPos - currentPos).Unit
+        local speed
+        if dist <= 15 then
+            speed = math.max(10, flySpeed * (dist / 15))
+        else
+            speed = flySpeed
+        end
+
+        bv.Velocity = dir * speed
+        task.wait()
+    end
+
+    -- Brake + cleanup
+    if bv and bv.Parent then
+        bv.Velocity = Vector3.zero
+        task.wait(0.05)
+        bv:Destroy()
+    end
+    activeBV = nil
+
+    if reached and HRP and HRP.Parent then
+        HRP.CFrame = CFrame.new(targetPos)
+        HRP.AssemblyLinearVelocity = Vector3.zero
+        task.wait(0.05)
+    end
+
+    Humanoid.PlatformStand = false
+
+    return reached
+end
+
+-- Stop fly + noclip instantly
+local function stopFlyNoclip()
+    -- Kill tracked BodyVelocity
+    if activeBV and activeBV.Parent then
+        activeBV.Velocity = Vector3.zero
+        activeBV:Destroy()
+    end
+    activeBV = nil
+
+    -- Also destroy ANY leftover BodyVelocity on HRP (safety net)
+    if HRP then
+        for _, bv in ipairs(HRP:GetChildren()) do
+            if bv:IsA("BodyVelocity") then
+                bv.Velocity = Vector3.zero
+                bv:Destroy()
+            end
+        end
+    end
+
+    setNoclip(false)
+
+    if Humanoid then
+        Humanoid.PlatformStand = false
+        Humanoid.AutoRotate    = true
+    end
+
+    if HRP then
+        HRP.AssemblyLinearVelocity  = Vector3.zero
+        HRP.AssemblyAngularVelocity = Vector3.zero
+        -- Anchor briefly to flush any accumulated physics momentum
+        HRP.Anchored = true
+        task.wait(0.15)
+        HRP.Anchored = false
+        HRP.AssemblyLinearVelocity  = Vector3.zero
+        HRP.AssemblyAngularVelocity = Vector3.zero
+    end
+
+    -- Extra safety: force PlatformStand off again after brief wait
+    -- in case a dying farm loop tried to set it back
+    task.delay(0.2, function()
+        if Humanoid then
+            Humanoid.PlatformStand = false
+            Humanoid.AutoRotate    = true
+        end
+        if HRP then
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+            HRP.AssemblyAngularVelocity = Vector3.zero
+        end
+    end)
+end
+
+-- ============================================================
+-- YEAR / ALCHEMY DATA
+-- ============================================================
+local YEAR_DISPLAY_LIST = {
+    "One Year Old","Ten Year Old","Hundred Year Old","Thousand Year Old",
+    "Ten Thousand Year Old","One Hundred Thousand Year Old",
+    "Million Year Old","Ten Million Year Old",
+}
+local YEAR_TO_VARIATION = {
+    ["One Year Old"]="One",["Ten Year Old"]="Ten",["Hundred Year Old"]="Hundred",
+    ["Thousand Year Old"]="Thousand",["Ten Thousand Year Old"]="Ten Thousand",
+    ["One Hundred Thousand Year Old"]="Hundred Thousand",
+    ["Million Year Old"]="Million",["Ten Million Year Old"]="Ten Million",
+}
+local YEAR_COLOURS = {
+    ["One"]=Color3.fromRGB(200,200,200),["Ten"]=Color3.fromRGB(150,230,150),
+    ["Hundred"]=Color3.fromRGB(100,210,100),["Thousand"]=Color3.fromRGB(100,150,255),
+    ["Ten Thousand"]=Color3.fromRGB(180,100,255),["Hundred Thousand"]=Color3.fromRGB(255,210,50),
+    ["Million"]=Color3.fromRGB(255,130,50),["Ten Million"]=Color3.fromRGB(255,60,60),
+}
+
+local selectedAlchemyYear = "Thousand"
+local alchemyCraftAmount  = 1
+
+local HERB_ELEMENT = {
+    ["Ginseng"]="Earth",["Taixian"]="Earth",["Qilin Berries"]="Heaven",
+    ["Moonlight Flower"]="Heaven",["Twilight Bloom"]="Yin",["Spirit Grass"]="Yin",
+    ["Blood Flower"]="Yin",["Yin Bush"]="Yin",["Lingzhi"]="Yang",["Yang Flower"]="Yang",
+}
+
+local ALCHEMY_RECIPES = {
+    ["Breakthrough Pill"]    = {Base=40,  Elements={"Earth","Earth","Earth","Earth"},           Herbs={"Ginseng","Ginseng","Ginseng","Ginseng"},                     Requirement="Mortal I+ (Qi Rank 0+)"},
+    ["Restoration Pill"]     = {Base=50,  Elements={"Earth","Earth","Earth","Yang"},            Herbs={"Ginseng","Ginseng","Ginseng","Yang Flower"},                 Requirement="Body Refining skill learned"},
+    ["Health Pill"]          = {Base=80,  Elements={"Yin","Earth","Yang","Earth"},              Herbs={"Yin Bush","Ginseng","Yang Flower","Ginseng"},                Requirement="Qi Fusion I+ (Qi Rank 20+)"},
+    ["Qi Pill"]              = {Base=80,  Elements={"Heaven","Heaven","Earth","Yin"},           Herbs={"Qilin Berries","Qilin Berries","Ginseng","Yin Bush"},        Requirement="True Foundation I+ (Qi Rank 40+)"},
+    ["Molian Pill"]          = {Base=150, Elements={"Yin","Yin","Yang","Heaven"},               Herbs={"Yin Bush","Yin Bush","Yang Flower","Qilin Berries"},         Requirement="Core Formation I+ (Qi Rank 50+)"},
+    ["Shulian Pill"]         = {Base=150, Elements={"Heaven","Heaven","Heaven","Heaven"},       Herbs={"Qilin Berries","Qilin Berries","Qilin Berries","Qilin Berries"},Requirement="Immortal I+ (Qi Rank 100+)"},
+    ["Dragon Pill"]          = {Base=250, Elements={"Earth","Heaven","Yin","Yang"},             Herbs={"Ginseng","Qilin Berries","Yin Bush","Yang Flower"},          Requirement="Give 100k Year herb of each element to Shao Ruogang"},
+    ["Tian Pill"]            = {Base=275, Elements={"Earth","Heaven","Heaven","Earth"},         Herbs={"Ginseng","Qilin Berries","Qilin Berries","Ginseng"},         Requirement="Creation Realm I+ (Qi Rank 200+)"},
+    ["Soul Breakthrough Pill"]={Base=300, Elements={"Yin","Yang","Yin","Yang"},                 Herbs={"Yin Bush","Yang Flower","Yin Bush","Yang Flower"},           Requirement="1 Ascension"},
+    ["Soul Energy Pill"]     = {Base=300, Elements={"Yin","Yin","Yang","Yang"},                 Herbs={"Yin Bush","Yin Bush","Yang Flower","Yang Flower"},           Requirement="3 Ascensions"},
+    ["Soul Chance Pill"]     = {Base=400, Elements={"Yang","Yang","Yin","Yin"},                 Herbs={"Yang Flower","Yang Flower","Yin Bush","Yin Bush"},           Requirement="1 Ascension"},
+    ["Soul Cap Pill"]        = {Base=300, Elements={"Yang","Yin","Yang","Yin"},                 Herbs={"Yang Flower","Yin Bush","Yang Flower","Yin Bush"},           Requirement="10 Ascensions"},
+}
+
+local recipeNames = {}
+for name in pairs(ALCHEMY_RECIPES) do table.insert(recipeNames,name) end
+table.sort(recipeNames)
+local selectedRecipe = nil
+
+-- Element → semua herb dalam element tu, disusun dari base value TERTINGGI
+-- Script auto picks highest base value herb to maximize craft success
+local ELEMENT_HERBS = {
+    Earth   = {"Taixian","Ginseng"},           -- Taixian(18) > Ginseng(8)
+    Heaven  = {"Moonlight Flower","Qilin Berries"}, -- Moonlight(25) > Qilin(23)
+    Yin     = {"Yin Bush","Blood Flower","Twilight Bloom","Spirit Grass"}, -- 50>35>30>16
+    Yang    = {"Yang Flower","Lingzhi"},        -- Yang Flower(45) > Lingzhi(15)
+}
+
+local HERB_BASE_VALUE = {
+    ["Ginseng"]=8,["Taixian"]=18,["Qilin Berries"]=23,["Moonlight Flower"]=25,
+    ["Twilight Bloom"]=30,["Blood Flower"]=35,["Yang Flower"]=45,["Yin Bush"]=50,
+    ["Lingzhi"]=15,["Spirit Grass"]=16,
+}
+
+local YEAR_MULTIPLIER = {
+    ["One"]=1,["Ten"]=2,["Hundred"]=4,["Thousand"]=8,["Ten Thousand"]=16,
+    ["Hundred Thousand"]=32,["Million"]=64,["Ten Million"]=128,
+}
+
+-- Pick best herb (highest base value) for selected element + year
+-- selectedHerbOverride = table {element -> herbName} if user wants to override
+local selectedElementHerb = {} -- {Earth="Taixian", Heaven="Moonlight Flower", ...}
+
+local function getBestHerbForElement(element)
+    -- If user picked a specific herb for this element, use it
+    if selectedElementHerb[element] then return selectedElementHerb[element] end
+    -- Otherwise use highest base value herb (index 1)
+    local herbs = ELEMENT_HERBS[element]
+    return herbs and herbs[1] or "Ginseng"
+end
+
+local function calcRecipeBase(recipe, yearVariation)
+    local total = 0
+    local mult  = YEAR_MULTIPLIER[yearVariation] or 1
+    for _, element in ipairs(recipe.Elements) do
+        local herb = getBestHerbForElement(element)
+        local base = HERB_BASE_VALUE[herb] or 8
+        total += base * mult
+    end
+    return total
+end
+
+-- ============================================================
+-- BLOODLINE DATA
+-- ============================================================
+local BLOODLINE_DATA = {
+    ["Forbidden Apple"]=1,["Spider"]=1,["Stone Monkey"]=1,
+    ["Turtle"]=2,["Wolf"]=2,["Giant"]=2,
+    ["Jade Monkey"]=3,["Fairy"]=3,["Fox"]=3,
+    ["True Phoenix"]=4,["Eternal Ice"]=4,["Heavenly Demon"]=4,
+    ["Stellar Monarch"]=4,["Primordial Beast"]=4,
+    ["Azure Dragon"]=5,["Immortal"]=5,
+}
+local bloodlineDropdownList = {"All Bloodlines"}
+do
+    local sorted={}
+    for name,tier in pairs(BLOODLINE_DATA) do table.insert(sorted,{name=name,tier=tier}) end
+    table.sort(sorted,function(a,b) if a.tier~=b.tier then return a.tier<b.tier end; return a.name<b.name end)
+    for _, v in ipairs(sorted) do table.insert(bloodlineDropdownList,string.format("[T%d] %s",v.tier,v.name)) end
+end
+
+-- ============================================================
+-- TREASURE CATEGORIES — fixed list
+-- ============================================================
+local TREASURE_CATEGORIES = {
+    "All Treasures",
+    "Common Treasure",
+    "Lost Treasure",
+    "Rare Treasure",
+    "Very Rare Treasure",
+}
+
+-- ============================================================
+-- QUEST DATA
+-- ============================================================
+local QUEST_DATA = {
+    -- === STANDARD QUESTS ===
+    ["Bei Fang"]        = {Type="Slaying",    Target="Bandit",                 Amount=5  },
+    ["Xi Hao"]          = {Type="Slaying",    Target="Commoner",               Amount=5  },
+    ["Xiao Ling"]       = {Type="Harvesting", Target="Ginseng",                Amount=5  },
+    ["Yang Wei"]        = {Type="Slaying",    Target="Female Blood Cultivator",Amount=7  },
+    ["Taoist Xi"]       = {Type="Slaying",    Target="Furious Sect Member",    Amount=6  },
+    ["Sun Tao"]         = {Type="Slaying",    Target="Male Assassin",          Amount=8  },
+    ["Gao Xiang"]       = {Type="Slaying",    Target="Sect Master",            Amount=3  },
+    ["Tong Li"]         = {Type="Slaying",    Target="Male Blood Cultivator",  Amount=6  },
+    ["Wu Hao"]          = {Type="Slaying",    Target="Bao Laohu",              Amount=1  },
+    ["Xia Hui"]         = {Type="Slaying",    Target="Corrupt Commoner",       Amount=7  },
+    ["Zhing Xiu"]       = {Type="Slaying",    Target="Corrupt Minion",         Amount=7  },
+    ["Xian Ling"]       = {Type="Slaying",    Target="Corrupt Admiral",        Amount=6  },
+    ["Yang Zhu"]        = {Type="Slaying",    Target="Mount Hua Leader",       Amount=1  },
+    ["Ling Qi"]         = {Type="Slaying",    Target="Stone Head Disciple",    Amount=6  },
+    ["Xumian Shidi"]    = {Type="Slaying",    Target="Slatebound Disciple",    Amount=12 },
+    ["Xumian Shixiong"] = {Type="Slaying",    Target="Slatebound Elder",       Amount=6  },
+    ["Yuzhou"]          = {Type="Slaying",    Target="Slatebound Sovereign",   Amount=8  },
+    ["Hongzhu Dashi"]   = {Type="Slaying",    Target="Diyu Mogui",             Amount=7  },
+    ["Shemni Nuzhu"]    = {Type="Slaying",    Target="Duyao Zhanshen",         Amount=8  },
+    ["Liehuo Jiangjun"] = {Type="Slaying",    Target="Siwang Zhi Zhang",       Amount=9  },
+    -- === HARVESTING SPECIAL QUESTS ===
+    ["Zhang Weiwei"]    = {Type="Harvesting", Target="Yin Bush",               Amount=100, Special=true},
+    ["Zhang Xiaoxiao"]  = {Type="Harvesting", Target="Yin Bush",               Amount=50,  Special=true},
+    ["Zhang Jingjing"]  = {Type="Harvesting", Target="Yang Flower",            Amount=50,  Special=true},
+    ["Zhang Xinxin"]    = {Type="Harvesting", Target="Yang Flower",            Amount=100, Special=true},
+    ["Zhang Yiwang"]    = {Type="Harvesting", Target="Blood Flower",           Amount=250, Special=true},
+    ["Yiwang Yaotian"]  = {Type="Harvesting", Target="Blood Flower",           Amount=500, Special=true},
+    -- === DEMON PATH QUESTS (Path Warning) ===
+    ["Mo Gui"]          = {Type="Slaying",    Target="Professional Guard",     Amount=50,  Special=true, Path="Demon"},
+    ["Mo Yan"]          = {Type="Slaying",    Target="Loyal Guard",            Amount=100, Special=true, Path="Demon"},
+}
+local questNamesList = {}
+local harvestQuestNames = {}
+local slayingQuestNames = {}
+for name, data in pairs(QUEST_DATA) do
+    table.insert(questNamesList, name)
+    if data.Type == "Harvesting" then
+        table.insert(harvestQuestNames, name)
+    else
+        table.insert(slayingQuestNames, name)
+    end
+end
+table.sort(questNamesList)
+table.sort(harvestQuestNames)
+table.sort(slayingQuestNames)
+
+-- ============================================================
+-- STOP ALL
+-- ============================================================
+local function stopAll()
+    herbActive=false; treasureActive=false; altarActive=false
+    mobActive=false; questActive=false; alchemyActive=false
+    bossFarmActive=false; harvestQuestActive=false; slayQuestActive=false
+    if activeTween then activeTween:Cancel(); activeTween=nil end
+    herbCollectCount=0; treasureCollectCount=0; altarCollectCount=0
+    stopFlyNoclip()
+end
+
+-- ============================================================
+-- HELPERS
+-- ============================================================
+local function getCF(obj)
+    if not obj then return nil end
+    if typeof(obj)=="CFrame" then return obj end
+    local cf
+    pcall(function()
+        if obj:IsA("Model") then cf=obj:GetPivot()
+        elseif obj:IsA("BasePart") then cf=obj.CFrame
+        elseif obj:IsA("Folder") then
+            local p=obj:FindFirstChildWhichIsA("BasePart",true)
+            if p then cf=p.CFrame end
+        else cf=obj:GetPivot() end
+    end)
+    return cf
+end
+
+local function isPlayerInZone(zoneObj)
+    if not zoneObj or not HRP then return false end
+    local zonePart=zoneObj:IsA("BasePart") and zoneObj or zoneObj:FindFirstChildWhichIsA("BasePart",true)
+    if not zonePart then return false end
+    local dist=(HRP.Position-zonePart.Position).Magnitude
+    local maxD=math.max(zonePart.Size.X,zonePart.Size.Y,zonePart.Size.Z)/2
+    return dist<=maxD+2
+end
+
+local function getHerbVariation(obj)
+    local v=nil
+    pcall(function() v=obj:GetAttribute("Variation") end)
+    if not v then pcall(function() local vc=obj:FindFirstChild("Variation"); if vc then v=vc.Value end end) end
+    if not v then
+        local n=obj.Name or ""
+        for _, yr in ipairs({"Ten Million","Million","Hundred Thousand","Ten Thousand","Thousand","Hundred","Ten","One"}) do
+            if n:find(yr) then v=yr; break end
+        end
+    end
+    return v or "One"
+end
+
+local function findRandomHerb(folder,minDistance,yearFilter)
+    if not folder or not HRP then return nil,0 end
+    minDistance=minDistance or 5
+    local valid={}
+    for _, obj in pairs(folder:GetChildren()) do
+        if not obj.Parent then continue end
+        if yearFilter and getHerbVariation(obj)~=yearFilter then continue end
+        local pos
+        pcall(function()
+            if obj:IsA("Model") then pos=obj:GetPivot().Position
+            elseif obj:IsA("BasePart") then pos=obj.Position
+            elseif obj:IsA("Folder") then local p=obj:FindFirstChildWhichIsA("BasePart",true); if p then pos=p.Position end end
+        end)
+        if pos then
+            local d=(HRP.Position-pos).Magnitude
+            if d>=minDistance then table.insert(valid,{obj=obj,dist=d}) end
+        end
+    end
+    if #valid>0 then local c=valid[math.random(1,#valid)]; return c.obj,c.dist end
+    return nil,0
+end
+
+local function findNearest(folder,minDistance,filterFunc)
+    if not folder or not HRP then return nil,math.huge end
+    minDistance=minDistance or 0
+    local nearest,shortest=nil,math.huge
+    for _, obj in pairs(folder:GetChildren()) do
+        if not obj.Parent then continue end
+        if filterFunc and not filterFunc(obj) then continue end
+        local pos
+        pcall(function()
+            if obj:IsA("Model") then pos=obj:GetPivot().Position
+            elseif obj:IsA("BasePart") then pos=obj.Position
+            elseif obj:IsA("Folder") then local p=obj:FindFirstChildWhichIsA("BasePart",true); if p then pos=p.Position end end
+        end)
+        if pos then
+            local d=(HRP.Position-pos).Magnitude
+            if d>=minDistance and d<shortest then shortest=d; nearest=obj end
+        end
+    end
+    return nearest,shortest
+end
+
+-- ============================================================
+-- HARVEST PROGRESS BAR
+-- ============================================================
+local function getProgressBar()
+    local gui=Player.PlayerGui
+    local hp=gui:FindFirstChild("harvestPrompt")
+    if hp then local pb=hp:FindFirstChild("ProgressBar"); if pb then local p=pb:FindFirstChild("Progress"); return p or pb end end
+    for _, v in pairs(gui:GetDescendants()) do
+        if v.Name=="Progress" and v.Parent and v.Parent.Name=="ProgressBar" then return v end
+    end
+    return nil
+end
+
+local function waitForHarvestComplete(activeCheck)
+    local bar,t0=nil,tick()
+    while tick()-t0<1.5 and activeCheck() do bar=getProgressBar(); if bar then break end; task.wait(0.02) end
+    if not bar then return "swap" end
+    local s0=0; pcall(function() s0=bar.Size.X.Scale end)
+    task.wait(1.0)
+    if not activeCheck() then return "stop" end
+    local sc=0; pcall(function() sc=bar.Size.X.Scale end)
+    if sc<=s0+0.01 then return "swap" end
+    local prev,peaked=sc,false; local timeout=tick()
+    while activeCheck() and tick()-timeout<30 do
+        local s=0; pcall(function() s=bar.Size.X.Scale end)
+        if s>=0.3 and not peaked then peaked=true end
+        if peaked and prev>=0.2 and s<=0.02 then return "complete" end
+        prev=s; task.wait(0.01)
+    end
+    return "timeout"
+end
+
+local function getHerbFolder(name)
+    local herbs=workspace:FindFirstChild("Herbs"); if not herbs then return nil end
+    local node=herbs:FindFirstChild(name); if not node then return nil end
+    return node:FindFirstChild("Folder") or node
+end
+
+-- ============================================================
+-- HERB FARMING (FLY + NOCLIP)
+-- ============================================================
+
+-- Collect ONE herb, return true if collected, false if nothing found
+local function doOneHerb()
+    local list = type(selectedHerb)=="table" and selectedHerb or {selectedHerb}
+    if not list or #list == 0 then return false end
+
+    local foundHerb = nil
+    for _, herbName in ipairs(list) do
+        local folder = getHerbFolder(herbName)
+        if folder then
+            local h = findRandomHerb(folder, 5, selectedHerbYear)
+            if h then foundHerb = h; break end
+        end
+    end
+    if not foundHerb or not foundHerb.Parent then return false end
+
+    local zone = foundHerb:FindFirstChild("HerbZone", true)
+    if not zone then return false end
+    local targetCF = getCF(zone)
+    if not targetCF then return false end
+
+    local reached = flyTo(targetCF.Position, function() return herbActive or treasureActive or altarActive end)
+    if not reached then return false end
+
+    local attempt = 0
+    while not isPlayerInZone(zone) and attempt < 10 and (herbActive or treasureActive or altarActive) do
+        attempt += 1
+        local zCF = getCF(zone)
+        if zCF then HRP.CFrame = CFrame.new(zCF.Position); HRP.AssemblyLinearVelocity = Vector3.zero end
+        task.wait(0.05)
+    end
+    if not isPlayerInZone(zone) then return false end
+    task.wait(0.3)
+    if not isPlayerInZone(zone) then return false end
+
+    pcall(function() ReplicatedStorage.RemoteEvents.Harvest:FireServer() end)
+    local result = waitForHarvestComplete(function() return herbActive or treasureActive or altarActive end)
+    if result == "complete" then herbCollectCount += 1; return true end
+    return false
+end
+
+-- ============================================================
+-- TREASURE FARMING (FLY + NOCLIP)
+-- ============================================================
+local function firePrompt(obj)
+    local kh = obj:FindFirstChild("KeyHole")
+    if kh then local p = kh:FindFirstChild("OpenPrompt"); if p and p:IsA("ProximityPrompt") then fireproximityprompt(p); return true end end
+    local p = obj:FindFirstChildOfClass("ProximityPrompt", true)
+    if p then fireproximityprompt(p); return true end
+    return false
+end
+
+local function treasureMatchesFilter(obj)
+    if not selectedTreasure or #selectedTreasure == 0 then return true end
+    for _, pick in ipairs(selectedTreasure) do
+        if pick == "All Treasures" then return true end
+        local nameLen = #pick
+        if obj.Name:sub(1, nameLen) == pick then
+            local nextChar = obj.Name:sub(nameLen + 1, nameLen + 1)
+            if nextChar == "" or nextChar == " " or tonumber(nextChar) then return true end
+        end
+    end
+    return false
+end
+
+-- Loot ONE treasure, return true if looted
+local function doOneTreasure()
+    local folder = workspace:FindFirstChild("Treasures")
+    if not folder then return false end
+
+    local treasure = findNearest(folder, 0, treasureMatchesFilter)
+    if not treasure then return false end
+
+    local cf = getCF(treasure)
+    if not cf then return false end
+
+    local reached = flyTo(cf.Position, function() return herbActive or treasureActive or altarActive end)
+    if not reached or not treasure.Parent then return false end
+
+    cf = getCF(treasure)
+    if cf then
+        HRP.CFrame = CFrame.new(cf.Position); HRP.AssemblyLinearVelocity = Vector3.zero; HRP.AssemblyAngularVelocity = Vector3.zero
+        task.wait(0.05); HRP.Anchored = true; task.wait(0.15); HRP.Anchored = false
+        HRP.AssemblyLinearVelocity = Vector3.zero; task.wait(0.3)
+    end
+
+    local hasPrompt = false; local count = 0
+    while treasure.Parent and treasureActive and count < 400 do
+        local curCF = getCF(treasure)
+        if curCF and (HRP.Position - curCF.Position).Magnitude > 20 then
+            HRP.CFrame = CFrame.new(curCF.Position); HRP.AssemblyLinearVelocity = Vector3.zero; task.wait(0.2)
+        end
+        if firePrompt(treasure) then hasPrompt = true end
+        count += 1; task.wait(0.05)
+    end
+
+    if not treasure.Parent then treasureCollectCount += 1; return true end
+    return false
+end
+
+-- ============================================================
+-- ALTAR FARMING (FLY + NOCLIP)
+-- ============================================================
+local function fireAltarPrompt(altar)
+    for _, d in pairs(altar:GetDescendants()) do
+        if d:IsA("ProximityPrompt") and d.Name:lower():find("collect") then fireproximityprompt(d); return true end
+    end
+    local p = altar:FindFirstChildOfClass("ProximityPrompt", true)
+    if p then fireproximityprompt(p); return true end
+    return false
+end
+
+local function altarMatchesBloodline(altar)
+    if not selectedBloodline or #selectedBloodline == 0 then return true end
+    local al = altar.Name:lower()
+    local bv = altar:FindFirstChild("Bloodline")
+    local attr = nil; pcall(function() attr = altar:GetAttribute("Bloodline") end)
+    for _, pick in ipairs(selectedBloodline) do
+        local bl = pick:lower()
+        if al:find(bl, 1, true) then return true end
+        if bv and bv.Value and bv.Value:lower() == bl then return true end
+        if attr and attr:lower() == bl then return true end
+    end
+    return false
+end
+
+-- Collect ONE altar, return true if collected
+local function doOneAltar()
+    local folder = workspace:FindFirstChild("Altars")
+    if not folder then return false end
+    local nearest = findNearest(folder, 0, altarMatchesBloodline)
+    if not nearest then return false end
+    local cf = getCF(nearest)
+    if not cf then return false end
+    local reached = flyTo(cf.Position, function() return herbActive or treasureActive or altarActive end)
+    if not reached then return false end
+    task.wait(0.5)
+    fireAltarPrompt(nearest)
+    task.wait(0.5)
+    altarCollectCount += 1
+    return true
+end
+
+-- ============================================================
+-- MULTI-FARM COORDINATOR (Round-Robin by Priority)
+-- ============================================================
+local function runMultiFarm()
+    setNoclip(true)
+    -- cycleIndex tracks where in the sorted priority list we are
+    local cycleIndex = 1
+
+    while herbActive or treasureActive or altarActive do
+        -- Build priority queue sorted by farmPriority value (lower number = higher priority)
+        local queue = {}
+        if altarActive  then table.insert(queue, {t="altar",   p=farmPriority.altar})   end
+        if treasureActive then table.insert(queue, {t="treasure", p=farmPriority.treasure}) end
+        if herbActive   then table.insert(queue, {t="herb",    p=farmPriority.herb})    end
+
+        if #queue == 0 then break end
+        table.sort(queue, function(a,b) return a.p < b.p end)
+
+        -- Clamp cycleIndex to valid range
+        if cycleIndex > #queue then cycleIndex = 1 end
+
+        -- Try from cycleIndex, wrap around if needed
+        local tried = 0
+        local didSomething = false
+        while tried < #queue do
+            local farm = queue[cycleIndex]
+            cycleIndex = (cycleIndex % #queue) + 1
+            tried += 1
+
+            local ok = false
+            if farm.t == "altar" and altarActive then
+                ok = doOneAltar()
+            elseif farm.t == "treasure" and treasureActive then
+                ok = doOneTreasure()
+            elseif farm.t == "herb" and herbActive then
+                ok = doOneHerb()
+            end
+
+            if ok then
+                didSomething = true
+                -- Small pause before switching to next farm type
+                task.wait(0.3)
+                break
+            end
+        end
+
+        if not didSomething then
+            -- Nothing available in any farm, wait and retry
+            task.wait(2)
+        end
+    end
+
+    multiFarmThread = nil
+    stopFlyNoclip()
+end
+
+local function ensureMultiFarmRunning()
+    if multiFarmThread then return end
+    multiFarmThread = task.spawn(runMultiFarm)
+end
+
+-- ============================================================
+-- MOB FARMING (FLY + NOCLIP)
+-- ============================================================
+local COMBAT_DISTANCE = 6
+
+local function getCombatCFrame(mobRoot)
+    -- Directly above mob's head
+    local abovePos = mobRoot.Position + Vector3.new(0, mobDistance, 0)
+    -- Face same direction as mob's head (copy mob's LookVector)
+    -- Then tilt -90 on X to lay flat (prone)
+    return CFrame.new(abovePos, abovePos + mobRoot.CFrame.LookVector) * CFrame.Angles(-math.pi/2, 0, 0)
+end
+
+local function farmMobs()
+    local folder=workspace:FindFirstChild("Enemies"); if not folder then return end
+    setNoclip(true)
+
+    while mobActive do
+        if justRespawned then while justRespawned and mobActive do task.wait(0.5) end end
+        if not mobActive then break end
+        local nearest,shortest=nil,math.huge
+        for _, mob in pairs(folder:GetChildren()) do
+            if mob.Name==selectedMob then
+                local hum=mob:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health>0 then
+                    local ok,pos=pcall(function() return mob:GetPivot().Position end)
+                    if ok then local d=(HRP.Position-pos).Magnitude; if d<shortest then shortest=d; nearest=mob end end
+                end
+            end
+        end
+        if not nearest then
+            Rayfield:Notify({Title="Mob Farm",Content=selectedMob.." not spawned.",Duration=2,Image=4483362458})
+            task.wait(1); continue
+        end
+        local mobRoot=nearest:FindFirstChild("HumanoidRootPart"); if not mobRoot then task.wait(0.5); continue end
+
+        -- Fly to hover position (above + side)
+        local initCF = getCombatCFrame(mobRoot)
+        flyTo(initCF.Position, function() return mobActive end)
+        task.wait(0.05)
+        if not mobActive then break end
+        if not nearest.Parent then task.wait(0.5); continue end
+
+        local hum=nearest:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health<=0 then task.wait(0.5); continue end
+
+        Humanoid.PlatformStand = true -- keep prone while attacking
+        local attackTimeout=tick()
+        while mobActive and nearest.Parent do
+            if justRespawned then break end
+            local h=nearest:FindFirstChildOfClass("Humanoid"); if not h or h.Health<=0 then break end
+            if tick()-attackTimeout>60 then break end
+            if mobRoot and mobRoot.Parent then
+                -- Lock to combat position: above, prone, facing mob
+                HRP.CFrame = getCombatCFrame(mobRoot)
+                HRP.AssemblyLinearVelocity  = Vector3.zero
+                HRP.AssemblyAngularVelocity = Vector3.zero
+            end
+            pcall(function() ReplicatedStorage.RemoteEvents.Attack:FireServer("Light",{["RootPart"]=HRP}) end)
+            task.wait(0.1)
+        end
+        -- Mob died — reset immediately to prevent fling
+        Humanoid.PlatformStand = false
+        Humanoid.AutoRotate = true
+        if HRP then
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+            HRP.AssemblyAngularVelocity = Vector3.zero
+            HRP.Anchored = true
+            task.wait(0.2)
+            HRP.Anchored = false
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+        end
+        task.wait(0.3)
+    end
+    Humanoid.PlatformStand = false
+    stopFlyNoclip()
+end
+
+-- ============================================================
+-- BOSS MOB FARMING (Zanshi Huo Ren / Zanshi Bing Ren)
+-- ============================================================
+local function farmBossMobs()
+    local folder = workspace:FindFirstChild("Enemies"); if not folder then return end
+    setNoclip(true)
+
+    while bossFarmActive do
+        if justRespawned then while justRespawned and bossFarmActive do task.wait(0.5) end end
+        if not bossFarmActive then break end
+
+        local nearest, shortest = nil, math.huge
+        for _, mob in pairs(folder:GetChildren()) do
+            if mob.Name == selectedBossMob then
+                local hum = mob:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local ok, pos = pcall(function() return mob:GetPivot().Position end)
+                    if ok then
+                        local d = (HRP.Position - pos).Magnitude
+                        if d < shortest then shortest = d; nearest = mob end
+                    end
+                end
+            end
+        end
+
+        if not nearest then
+            Rayfield:Notify({Title="Boss Farm", Content=selectedBossMob.." not spawned. Waiting...", Duration=3, Image=4483362458})
+            task.wait(3); continue
+        end
+
+        local mobRoot = nearest:FindFirstChild("HumanoidRootPart"); if not mobRoot then task.wait(0.5); continue end
+        local initCF = getCombatCFrame(mobRoot)
+        flyTo(initCF.Position, function() return bossFarmActive end)
+        task.wait(0.05)
+        if not bossFarmActive then break end
+        if not nearest.Parent then task.wait(0.5); continue end
+
+        local hum = nearest:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health <= 0 then task.wait(0.5); continue end
+
+        Humanoid.PlatformStand = true
+        local attackTimeout = tick()
+        while bossFarmActive and nearest.Parent do
+            if justRespawned then break end
+            local h = nearest:FindFirstChildOfClass("Humanoid"); if not h or h.Health <= 0 then break end
+            if tick() - attackTimeout > 120 then break end
+            if mobRoot and mobRoot.Parent then
+                HRP.CFrame = getCombatCFrame(mobRoot)
+                HRP.AssemblyLinearVelocity  = Vector3.zero
+                HRP.AssemblyAngularVelocity = Vector3.zero
+            end
+            pcall(function() ReplicatedStorage.RemoteEvents.Attack:FireServer("Light", {["RootPart"]=HRP}) end)
+            task.wait(0.1)
+        end
+        Humanoid.PlatformStand = false
+        Humanoid.AutoRotate = true
+        if HRP then
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+            HRP.AssemblyAngularVelocity = Vector3.zero
+            HRP.Anchored = true; task.wait(0.2); HRP.Anchored = false
+            HRP.AssemblyLinearVelocity = Vector3.zero
+        end
+        task.wait(0.3)
+    end
+    Humanoid.PlatformStand = false
+    stopFlyNoclip()
+end
+-- ============================================================
+local function getProgressFromServer(npcName)
+    local function check(qd)
+        if qd and qd:FindFirstChild("NpcName") and qd.NpcName.Value==npcName then
+            if qd:FindFirstChild("Progress") and qd:FindFirstChild("ProgressEnd") then
+                return qd.Progress.Value,qd.ProgressEnd.Value
+            end
+        end
+        return nil,nil
+    end
+    local p,e=check(Player:FindFirstChild("QuestData")); if p then return p,e end
+    return check(Player:FindFirstChild("SecondQuestData"))
+end
+
+local function acceptQuest(npcName)
+    pcall(function() ReplicatedStorage.RemoteFunctions.Quest:InvokeServer(npcName,true) end)
+    task.wait(0.5)
+end
+
+-- Quest Slaying — FLY + NOCLIP to mob
+local function farmQuestSlaying(npcName, target, lbl)
+    local folder = workspace:FindFirstChild("Enemies"); if not folder then return end
+    setNoclip(true)
+    while slayQuestActive do
+        if justRespawned then while justRespawned and slayQuestActive do task.wait(0.5) end end
+        if not slayQuestActive then break end
+        local prog, pEnd = getProgressFromServer(npcName)
+        if not prog then break end
+        lbl:Set(" Progress: "..prog.." / "..pEnd)
+        if prog >= pEnd then break end
+        local nearest, shortest = nil, math.huge
+        for _, mob in pairs(folder:GetChildren()) do
+            if mob.Name == target then
+                local hum = mob:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local ok, pos = pcall(function() return mob:GetPivot().Position end)
+                    if ok then local d = (HRP.Position - pos).Magnitude; if d < shortest then shortest = d; nearest = mob end end
+                end
+            end
+        end
+        if not nearest then
+            Rayfield:Notify({Title="Quest Slay", Content=target.." not found. Waiting...", Duration=2, Image=4483362458})
+            task.wait(2); continue
+        end
+        local mobRoot = nearest:FindFirstChild("HumanoidRootPart"); if not mobRoot then task.wait(0.5); continue end
+
+        local initCF = getCombatCFrame(mobRoot)
+        flyTo(initCF.Position, function() return slayQuestActive end)
+        task.wait(0.05)
+        if not slayQuestActive then break end
+        if not nearest.Parent then task.wait(1); continue end
+
+        local hum = nearest:FindFirstChildOfClass("Humanoid"); if not hum or hum.Health <= 0 then task.wait(0.5); continue end
+
+        Humanoid.PlatformStand = true
+        local attackTimeout = tick()
+        while slayQuestActive and nearest.Parent do
+            if justRespawned then break end
+            local h = nearest:FindFirstChildOfClass("Humanoid"); if not h or h.Health <= 0 then break end
+            if tick() - attackTimeout > 60 then break end
+            if mobRoot and mobRoot.Parent then
+                HRP.CFrame = getCombatCFrame(mobRoot)
+                HRP.AssemblyLinearVelocity  = Vector3.zero
+                HRP.AssemblyAngularVelocity = Vector3.zero
+            end
+            pcall(function() ReplicatedStorage.RemoteEvents.Attack:FireServer("Light", {["RootPart"]=HRP}) end)
+            task.wait(0.1)
+        end
+        Humanoid.PlatformStand = false
+        Humanoid.AutoRotate = true
+        if HRP then
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+            HRP.AssemblyAngularVelocity = Vector3.zero
+            HRP.Anchored = true; task.wait(0.2); HRP.Anchored = false
+            HRP.AssemblyLinearVelocity  = Vector3.zero
+        end
+        task.wait(0.3)
+    end
+    Humanoid.PlatformStand = false
+end
+
+-- Quest Harvesting — guna logik SAMA dengan doOneHerb() (getHerbFolder + findRandomHerb)
+local function farmQuestHarvesting(npcName, target, lbl)
+    setNoclip(true)
+    while harvestQuestActive do
+        local prog, pEnd = getProgressFromServer(npcName)
+        if not prog then break end
+        lbl:Set(" Progress: "..prog.." / "..pEnd)
+        if prog >= pEnd then break end
+
+        -- Guna getHerbFolder — SAMA dengan herb farm biasa
+        local folder = getHerbFolder(target)
+        if not folder then
+            Rayfield:Notify({Title="Quest Harvest", Content=target.." not found. Waiting...", Duration=3, Image=4483362458})
+            task.wait(3); continue
+        end
+
+        -- findRandomHerb — SAMA dengan herb farm biasa (minDist=5, no year filter)
+        local herb, _ = findRandomHerb(folder, 5, nil)
+        if not herb or not herb.Parent then
+            Rayfield:Notify({Title="Quest Harvest", Content=target.." not spawned yet. Waiting...", Duration=2, Image=4483362458})
+            task.wait(2); continue
+        end
+
+        local zone = herb:FindFirstChild("HerbZone", true)
+        if not zone then task.wait(0.5); continue end
+        local targetCF = getCF(zone)
+        if not targetCF then task.wait(0.2); continue end
+
+        -- Fly ke herb zone — SAMA dengan doOneHerb
+        local reached = flyTo(targetCF.Position, function() return harvestQuestActive end)
+        if not harvestQuestActive then break end
+        if not reached then task.wait(0.2); continue end
+
+        -- Fine-adjust masuk zone — SAMA dengan doOneHerb
+        local attempt = 0
+        while not isPlayerInZone(zone) and attempt < 10 and harvestQuestActive do
+            attempt += 1
+            local zCF = getCF(zone)
+            if zCF then HRP.CFrame = CFrame.new(zCF.Position); HRP.AssemblyLinearVelocity = Vector3.zero end
+            task.wait(0.05)
+        end
+        if not isPlayerInZone(zone) then continue end
+        task.wait(0.3)
+        if not isPlayerInZone(zone) or not harvestQuestActive then continue end
+
+        -- Harvest + tunggu complete — SAMA dengan doOneHerb
+        pcall(function() ReplicatedStorage.RemoteEvents.Harvest:FireServer() end)
+        waitForHarvestComplete(function() return harvestQuestActive end)
+        if not harvestQuestActive then break end
+    end
+end
+        task.wait(1)
+    end
+    stopFlyNoclip()
+end
+
+-- ============================================================
+-- ALCHEMY
+-- ============================================================
+local function runAlchemy(lblStatus,isLoop)
+    if not selectedRecipe then
+        Rayfield:Notify({Title="Alchemy",Content="Select a recipe first!",Duration=3,Image=4483362458})
+        if not isLoop then alchemyActive=false end; return
+    end
+    local recipe=ALCHEMY_RECIPES[selectedRecipe]; if not recipe then if not isLoop then alchemyActive=false end; return end
+    local crafted=0; local target=alchemyCraftAmount
+    lblStatus:Set(" Crafting: 0 / "..target)
+
+    -- Server only accepts: 1, 2, 5, 25, 100, 1000
+    -- For amounts 25 and above, always use batch of 5 repeated
+    -- e.g. 25 = 5x5, 100 = 20x5, 1000 = 200x5
+    -- For below 25, use largest valid batch that fits
+    local VALID_AMOUNTS = {1, 2, 5, 25, 100, 1000}
+
+    local function getLargestValidBatch(remaining)
+        local best = 1
+        for _, v in ipairs(VALID_AMOUNTS) do
+            if v <= remaining then best = v end
+        end
+        return best
+    end
+
+    local subBatch = target >= 25 and 5 or getLargestValidBatch(target)
+
+    while alchemyActive and crafted < target do
+        local remaining = target - crafted
+        -- Use subBatch if it fits, otherwise use largest valid that fits remaining
+        local batch = (remaining >= subBatch) and subBatch or getLargestValidBatch(remaining)
+
+        local herbArgs={}
+        for i=1,4 do
+            local element = recipe.Elements[i]
+            local herbName = getBestHerbForElement(element)
+            herbArgs[i] = {["Name"]=herbName, ["Variation"]=selectedAlchemyYear}
+        end
+
+        local ok, result = pcall(function()
+            return ReplicatedStorage.RemoteFunctions.Concoct:InvokeServer(herbArgs, batch)
+        end)
+
+        if ok and type(result)=="table" then
+            if result.Success then
+                crafted += batch
+                lblStatus:Set(" Crafting: "..crafted.." / "..target)
+                local itemName = result.ItemName or selectedRecipe
+                if itemName == "Failed Pill" then
+                    Rayfield:Notify({Title="Alchemy",Content="Failed Pill — potency low or recipe not unlocked.",Duration=4,Image=4483362458})
+                else
+                    Rayfield:Notify({Title="Alchemy",Content=itemName.." x"..batch.." ("..crafted.."/"..target..")",Duration=2,Image=4483362458})
+                end
+            else
+                local msg = result.Message or "Unknown error"
+                Rayfield:Notify({Title="Alchemy Failed",Content=msg,Duration=4,Image=4483362458})
+                if msg:find("Not enough") or msg:find("Recipe does not exist") then
+                    alchemyActive=false; break
+                end
+                task.wait(1)
+            end
+        else
+            Rayfield:Notify({Title="Alchemy",Content="Server error. Retrying...",Duration=3,Image=4483362458})
+            task.wait(1)
+        end
+        task.wait(1.5)
+    end
+
+    if not isLoop then
+        alchemyActive=false; lblStatus:Set(" Done! "..crafted.."x "..selectedRecipe)
+        Rayfield:Notify({Title="Alchemy",Content="Done! "..crafted.."x "..selectedRecipe,Duration=4,Image=4483362458})
+    else
+        lblStatus:Set(" Batch done: "..crafted.."x | Continuing...")
+    end
+end
+
+-- ============================================================
+-- SCAN WORKSPACE
+-- ============================================================
+local herbsList={}
+if workspace:FindFirstChild("Herbs") then
+    for _, h in pairs(workspace.Herbs:GetChildren()) do table.insert(herbsList,h.Name) end
+end
+if #herbsList==0 then herbsList={"Yin Bush","Yang Flower","Twilight Bloom","Taixian","Spirit Grass","Qilin Berries","Moonlight Flower","Lingzhi","Ginseng","Blood Flower"} end
+
+local mobsList,mobsSet={},{}
+if workspace:FindFirstChild("Enemies") then
+    for _, m in pairs(workspace.Enemies:GetChildren()) do
+        if not mobsSet[m.Name] then table.insert(mobsList,m.Name); mobsSet[m.Name]=true end
+    end
+end
+if #mobsList==0 then mobsList={"No mobs found"} end
+
+local trainingList,trainingData={},{}
+if workspace:FindFirstChild("Training Zones") then
+    for _, sub in pairs({"Training","Qi"}) do
+        local s=workspace["Training Zones"]:FindFirstChild(sub)
+        if s then for _, z in pairs(s:GetChildren()) do local n=sub.." - "..z.Name; table.insert(trainingList,n); trainingData[n]=z end end
+    end
+end
+
+-- ============================================================
+-- HERB ESP
+-- ============================================================
+local espActive=false; local selectedESPHerbs={}; local espObjects={}
+local espMaxDistance=5000; local espShowHighlight=true; local espShowText=true; local espYearFilter=nil
+
+local function createHerbESP(herb,herbName)
+    local herbZone=herb:FindFirstChild("HerbZone",true)
+    if not herbZone or not herbZone:IsA("BasePart") then return end
+    local variation=getHerbVariation(herb)
+    if espYearFilter and variation~=espYearFilter then return end
+    local espColor=YEAR_COLOURS[variation] or Color3.fromRGB(0,255,0)
+    local data={herb=herb,herbZone=herbZone,herbName=herbName,variation=variation}
+    if espShowText then
+        local bb=Instance.new("BillboardGui"); bb.Name="HerbESP"; bb.Adornee=herbZone
+        bb.Size=UDim2.new(0,160,0,70); bb.StudsOffset=Vector3.new(0,4,0); bb.AlwaysOnTop=true; bb.Parent=herbZone
+        local lbl=Instance.new("TextLabel"); lbl.Size=UDim2.new(1,0,1,0); lbl.BackgroundTransparency=1
+        lbl.TextColor3=espColor; lbl.TextStrokeTransparency=0; lbl.TextStrokeColor3=Color3.fromRGB(0,0,0)
+        lbl.TextScaled=true; lbl.Font=Enum.Font.GothamBold; lbl.Parent=bb
+        data.billboard=bb; data.label=lbl
+    end
+    if espShowHighlight then
+        local hl=Instance.new("Highlight"); hl.FillColor=espColor; hl.OutlineColor=Color3.fromRGB(255,255,255)
+        hl.FillTransparency=0.6; hl.OutlineTransparency=0.3; hl.DepthMode=Enum.HighlightDepthMode.AlwaysOnTop; hl.Parent=herbZone
+        data.highlight=hl
+    end
+    table.insert(espObjects,data)
+end
+
+local YEAR_SHORT={["One"]="1yr",["Ten"]="10yr",["Hundred"]="100yr",["Thousand"]="1k yr",["Ten Thousand"]="10k yr",["Hundred Thousand"]="100k yr",["Million"]="1M yr",["Ten Million"]="10M yr"}
+
+local function updateHerbESP()
+    if not espActive then return end
+    local char=Player.Character; if not char then return end
+    local hrp=char:FindFirstChild("HumanoidRootPart"); if not hrp then return end
+    for i=#espObjects,1,-1 do
+        local d=espObjects[i]
+        if d.herb and d.herb.Parent and d.herbZone and d.herbZone.Parent then
+            local dist=(hrp.Position-d.herbZone.Position).Magnitude; local visible=dist<=espMaxDistance
+            if d.billboard then d.billboard.Enabled=visible end
+            if d.highlight then d.highlight.Enabled=visible end
+            if visible and d.label then d.label.Text=string.format("%s\n%.0f studs",d.herbName,dist) end
+        else
+            if d.billboard then d.billboard:Destroy() end; if d.highlight then d.highlight:Destroy() end; table.remove(espObjects,i)
+        end
+    end
+end
+
+local function clearHerbESP()
+    for _, d in pairs(espObjects) do if d.billboard then d.billboard:Destroy() end; if d.highlight then d.highlight:Destroy() end end; espObjects={}
+end
+
+local function refreshHerbESP()
+    clearHerbESP(); if not espActive then return end
+    local herbs=workspace:FindFirstChild("Herbs"); if not herbs then return end
+    for herbName,enabled in pairs(selectedESPHerbs) do
+        if enabled then
+            local hf=herbs:FindFirstChild(herbName)
+            if hf then local folder=hf:FindFirstChild("Folder") or hf; for _, herb in pairs(folder:GetChildren()) do createHerbESP(herb,herbName) end end
+        end
+    end
+end
+
+RunService.RenderStepped:Connect(function() if espActive then updateHerbESP() end end)
+
+-- ============================================================
+-- TABS
+-- ============================================================
+
+-- 
+--   TAB 1 HERB  
+-- 
+local Tab1=Window:CreateTab(" Herb",4483362458)
+Tab1:CreateSection(" Herb Farm")
+Tab1:CreateDropdown({Name="Select Herb(s)",Options=herbsList,CurrentOption={"Select"},MultipleOptions=true,
+    Callback=function(opts) selectedHerb=opts end})
+Tab1:CreateDropdown({Name="Priority (1=first, 3=last)",Options={"1","2","3"},CurrentOption={"3"},MultipleOptions=false,
+    Callback=function(opt)
+        farmPriority.herb = tonumber(opt[1]) or 3
+        Rayfield:Notify({Title="Herb Farm",Content="Priority set to "..opt[1],Duration=2,Image=4483362458})
+    end})
+Tab1:CreateToggle({Name="Auto Farm Herb",CurrentValue=false,
+    Callback=function(val)
+        if val then
+            if not selectedHerb or (type(selectedHerb)=="table" and #selectedHerb==0) then
+                Rayfield:Notify({Title="Error",Content="Select herb(s) first!",Duration=3,Image=4483362458}); return
+            end
+            herbActive=true
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            ensureMultiFarmRunning()
+            Rayfield:Notify({Title="Herb Farm",Content="Started!",Duration=3,Image=4483362458})
+        else
+            herbActive=false
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            if not treasureActive and not altarActive then stopFlyNoclip() end
+            Rayfield:Notify({Title="Herb Farm",Content="Stopped.",Duration=2,Image=4483362458})
+        end
+    end})
+
+Tab1:CreateSection(" Herb ESP")
+Tab1:CreateDropdown({Name="Herbs for ESP",Options=herbsList,CurrentOption={},MultipleOptions=true,
+    Callback=function(sel) selectedESPHerbs={}; for _, n in pairs(sel) do selectedESPHerbs[n]=true end; if espActive then refreshHerbESP() end end})
+Tab1:CreateToggle({Name="Enable Herb ESP",CurrentValue=false,
+    Callback=function(val) espActive=val; if val then refreshHerbESP() else clearHerbESP() end end})
+Tab1:CreateSlider({Name="Max Distance",Range={100,5000},Increment=100,CurrentValue=5000,Callback=function(val) espMaxDistance=val end})
+Tab1:CreateToggle({Name="Show Highlight",CurrentValue=true,Callback=function(val) espShowHighlight=val; if espActive then refreshHerbESP() end end})
+Tab1:CreateToggle({Name="Show Text",CurrentValue=true,Callback=function(val) espShowText=val; if espActive then refreshHerbESP() end end})
+Tab1:CreateButton({Name=" Refresh ESP",Callback=function() refreshHerbESP(); Rayfield:Notify({Title="ESP",Content=#espObjects.." herbs",Duration=2,Image=4483362458}) end})
+
+-- 
+--   TAB 2 TREASURE    
+-- 
+local Tab2=Window:CreateTab(" Treasure",4483362458)
+Tab2:CreateSection(" Treasure Farm")
+Tab2:CreateDropdown({Name="Treasure Category",Options=TREASURE_CATEGORIES,CurrentOption={"All Treasures"},MultipleOptions=true,
+    Callback=function(opts)
+        selectedTreasure = {}
+        for _, pick in ipairs(opts) do table.insert(selectedTreasure, pick) end
+        local label = #selectedTreasure > 0 and table.concat(selectedTreasure, ", ") or "All"
+        Rayfield:Notify({Title="Treasure",Content="Selected: "..label,Duration=2,Image=4483362458})
+    end})
+Tab2:CreateDropdown({Name="Priority (1=first, 3=last)",Options={"1","2","3"},CurrentOption={"2"},MultipleOptions=false,
+    Callback=function(opt)
+        farmPriority.treasure = tonumber(opt[1]) or 2
+        Rayfield:Notify({Title="Treasure Farm",Content="Priority set to "..opt[1],Duration=2,Image=4483362458})
+    end})
+Tab2:CreateToggle({Name="Auto Farm Treasure",CurrentValue=false,
+    Callback=function(val)
+        if val then
+            treasureActive=true
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            ensureMultiFarmRunning()
+            local label = #selectedTreasure > 0 and table.concat(selectedTreasure, ", ") or "All"
+            Rayfield:Notify({Title="Treasure Farm",Content="Farming: "..label,Duration=3,Image=4483362458})
+        else
+            treasureActive=false
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            if not herbActive and not altarActive then stopFlyNoclip() end
+            Rayfield:Notify({Title="Treasure Farm",Content="Stopped.",Duration=2,Image=4483362458})
+        end
+    end})
+
+-- 
+--   TAB 3 ALTAR     
+-- 
+local Tab3=Window:CreateTab(" Altar",4483362458)
+Tab3:CreateSection(" Altar Farm")
+Tab3:CreateDropdown({Name="Priority (1=first, 3=last)",Options={"1","2","3"},CurrentOption={"1"},MultipleOptions=false,
+    Callback=function(opt)
+        farmPriority.altar = tonumber(opt[1]) or 1
+        Rayfield:Notify({Title="Altar Farm",Content="Priority set to "..opt[1],Duration=2,Image=4483362458})
+    end})
+Tab3:CreateToggle({Name="Auto Collect Altar",CurrentValue=false,
+    Callback=function(val)
+        if val then
+            altarActive=true
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            ensureMultiFarmRunning()
+            Rayfield:Notify({Title="Altar Farm",Content="Started.",Duration=3,Image=4483362458})
+        else
+            altarActive=false
+            pcall(function() ReplicatedStorage.RemoteEvents.Cultivate:FireServer() end)
+            if not herbActive and not treasureActive then stopFlyNoclip() end
+            Rayfield:Notify({Title="Altar Farm",Content="Stopped.",Duration=2,Image=4483362458})
+        end
+    end})
+-- 
+--   TAB 4 MOB   
+-- 
+local Tab4=Window:CreateTab(" Mob",4483362458)
+Tab4:CreateSection(" Combat Settings")
+Tab4:CreateDropdown({Name="Select Mob",Options=mobsList,CurrentOption={"Select"},MultipleOptions=false,
+    Callback=function(opt) selectedMob=opt[1] end})
+Tab4:CreateSlider({Name="Distance (studs)",Range={3,15},Increment=1,CurrentValue=6,
+    Callback=function(val) mobDistance=val end})
+Tab4:CreateToggle({Name="Auto Farm Mob",CurrentValue=false,
+    Callback=function(val)
+        if val then
+            if not selectedMob or selectedMob=="No mobs found" then
+                Rayfield:Notify({Title="Error",Content="Select mob!",Duration=3,Image=4483362458}); return
+            end
+            mobActive=true
+            task.spawn(function() while mobActive do farmMobs(); if mobActive then task.wait(1) end end end)
+            Rayfield:Notify({Title="Mob Farm",Content="Started!",Duration=3,Image=4483362458})
+        else
+            mobActive=false
+            Humanoid.PlatformStand = false
+            stopFlyNoclip()
+            Rayfield:Notify({Title="Mob Farm",Content="Stopped.",Duration=2,Image=4483362458})
+        end
+    end})
+
+-- 
+--   TAB 4B BOSS FARM  
+-- 
+local Tab4B = Window:CreateTab(" Boss Farm", 4483362458)
+Tab4B:CreateSection(" Boss Farm — Zanshi Bosses Only")
+Tab4B:CreateLabel(" Mobs: Zanshi Huo Ren | Zanshi Bing Ren")
+Tab4B:CreateDropdown({Name="Select Boss Mob", Options=BOSS_MOBS, CurrentOption={BOSS_MOBS[1]}, MultipleOptions=false,
+    Callback=function(opt)
+        selectedBossMob = opt[1]
+        Rayfield:Notify({Title="Boss Farm", Content="Target: "..selectedBossMob, Duration=2, Image=4483362458})
+    end})
+Tab4B:CreateSlider({Name="Distance (studs)", Range={3,15}, Increment=1, CurrentValue=6,
+    Callback=function(val) mobDistance=val end})
+Tab4B:CreateToggle({Name="Auto Farm Boss", CurrentValue=false,
+    Callback=function(val)
+        if val then
+            bossFarmActive = true
+            task.spawn(function()
+                while bossFarmActive do
+                    farmBossMobs()
+                    if bossFarmActive then task.wait(1) end
+                end
+            end)
+            Rayfield:Notify({Title="Boss Farm", Content="Started! Hunting: "..selectedBossMob, Duration=3, Image=4483362458})
+        else
+            bossFarmActive = false
+            Humanoid.PlatformStand = false
+            stopFlyNoclip()
+            Rayfield:Notify({Title="Boss Farm", Content="Stopped.", Duration=2, Image=4483362458})
+        end
+    end})
+Tab4B:CreateButton({Name=" Stop Boss Farm",
+    Callback=function()
+        bossFarmActive = false
+        Humanoid.PlatformStand = false
+        stopFlyNoclip()
+        Rayfield:Notify({Title="Boss Farm", Content="Stopped.", Duration=2, Image=4483362458})
+    end})
+
+-- 
+local harvestQuestActive = false
+local slayQuestActive    = false
+local selectedHarvestQuest = nil
+local selectedSlayQuest    = nil
+
+local function warnPathQuest(questName)
+    local info = QUEST_DATA[questName]
+    if info and info.Path then
+        Rayfield:Notify({
+            Title   = "Quest Warning",
+            Content = "Warning: This quest is for "..info.Path.." path only!",
+            Duration = 8,
+            Image    = 4483362458,
+        })
+    end
+end
+
+local function runHarvestQuestFarm(lblNPC, lblTarget, lblProg)
+    while harvestQuestActive do
+        local detected, prog, pEnd = nil, nil, nil
+        for qn, data in pairs(QUEST_DATA) do
+            if data.Type == "Harvesting" then
+                local p, e = getProgressFromServer(qn)
+                if p then detected = qn; prog = p; pEnd = e; break end
+            end
+        end
+        if not detected and selectedHarvestQuest then
+            acceptQuest(selectedHarvestQuest); task.wait(1)
+            local questDataExists = Player:FindFirstChild("QuestData") or Player:FindFirstChild("SecondQuestData")
+            if not questDataExists then
+                lblNPC:Set(" NPC: "..selectedHarvestQuest)
+                lblTarget:Set(" Target: NOT READY FOR QUEST")
+                lblProg:Set(" Progress: -")
+                Rayfield:Notify({Title="Quest FAIL", Content="Not ready for: "..selectedHarvestQuest, Duration=5, Image=4483362458})
+                task.wait(3); continue
+            end
+            prog, pEnd = getProgressFromServer(selectedHarvestQuest)
+            if prog then detected = selectedHarvestQuest
+            else task.wait(3); continue end
+        end
+        if not detected then task.wait(1); continue end
+        local info = QUEST_DATA[detected]; if not info then task.wait(1); continue end
+        lblNPC:Set(" NPC: "..detected)
+        lblTarget:Set(" "..info.Target.." [Harvesting]")
+        lblProg:Set(" Progress: "..prog.." / "..pEnd)
+        farmQuestHarvesting(detected, info.Target, lblProg)
+        if not harvestQuestActive then break end
+        local p2 = getProgressFromServer(detected)
+        if not p2 then
+            lblTarget:Set("  Quest done!")
+            if questLoopEnabled then task.wait(2); acceptQuest(detected); task.wait(1)
+            else harvestQuestActive = false; stopFlyNoclip(); break end
+        end
+        task.wait(1)
+    end
+    stopFlyNoclip()
+end
+
+local function runSlayQuestFarm(lblNPC, lblTarget, lblProg)
+    while slayQuestActive do
+        local detected, prog, pEnd = nil, nil, nil
+        for qn, data in pairs(QUEST_DATA) do
+            if data.Type == "Slaying" then
+                local p, e = getProgressFromServer(qn)
+                if p then detected = qn; prog = p; pEnd = e; break end
+            end
+        end
+        if not detected and selectedSlayQuest then
+            acceptQuest(selectedSlayQuest); task.wait(1)
+            local questDataExists = Player:FindFirstChild("QuestData") or Player:FindFirstChild("SecondQuestData")
+            if not questDataExists then
+                lblNPC:Set(" NPC: "..selectedSlayQuest)
+                lblTarget:Set(" Target: NOT READY FOR QUEST")
+                lblProg:Set(" Progress: -")
+                Rayfield:Notify({Title="Quest FAIL", Content="Not ready for: "..selectedSlayQuest, Duration=5, Image=4483362458})
+                task.wait(3); continue
+            end
+            prog, pEnd = getProgressFromServer(selectedSlayQuest)
+            if prog then detected = selectedSlayQuest
+            else task.wait(3); continue end
+        end
+        if not detected then task.wait(1); continue end
+        local info = QUEST_DATA[detected]; if not info then task.wait(1); continue end
+        lblNPC:Set(" NPC: "..detected)
+        lblTarget:Set(" "..info.Target.." [Slaying]")
+        lblProg:Set(" Progress: "..prog.." / "..pEnd)
+        farmQuestSlaying(detected, info.Target, lblProg)
+        if not slayQuestActive then break end
+        local p2 = getProgressFromServer(detected)
+        if not p2 then
+            lblTarget:Set("  Quest done!")
+            if questLoopEnabled then task.wait(2); acceptQuest(detected); task.wait(1)
+            else slayQuestActive = false; stopFlyNoclip(); break end
+        end
+        task.wait(1)
+    end
+    stopFlyNoclip()
+end
+
+local Tab5 = Window:CreateTab(" Quest", 4483362458)
+
+-- ─── TOP: HARVESTING QUESTS ───────────────────────────────────
+Tab5:CreateSection(" Harvesting Quests (Herb Gathering)")
+local hqLblNPC  = Tab5:CreateLabel(" NPC: -")
+local hqLblTgt  = Tab5:CreateLabel(" Target: -")
+local hqLblProg = Tab5:CreateLabel(" Progress: -")
+Tab5:CreateDropdown({Name="Select Harvest Quest", Options=harvestQuestNames, CurrentOption={"Select"}, MultipleOptions=false,
+    Callback=function(opt)
+        selectedHarvestQuest = opt[1]
+        local info = QUEST_DATA[selectedHarvestQuest]
+        if info then
+            hqLblNPC:Set(" NPC: "..selectedHarvestQuest)
+            hqLblTgt:Set(" "..info.Target.." [Harvesting] x"..info.Amount)
+            hqLblProg:Set(" Progress: -")
+            warnPathQuest(selectedHarvestQuest)
+        end
+    end})
+Tab5:CreateToggle({Name="Loop Harvest Quest", CurrentValue=false,
+    Callback=function(val) questLoopEnabled=val end})
+Tab5:CreateToggle({Name="Auto Farm Harvest Quest", CurrentValue=false,
+    Callback=function(val)
+        if val then
+            if not selectedHarvestQuest then
+                Rayfield:Notify({Title="Error", Content="Select a harvest quest first!", Duration=3, Image=4483362458}); return
+            end
+            harvestQuestActive = true
+            task.spawn(function() runHarvestQuestFarm(hqLblNPC, hqLblTgt, hqLblProg) end)
+            Rayfield:Notify({Title="Harvest Quest", Content="Started: "..selectedHarvestQuest, Duration=3, Image=4483362458})
+        else
+            harvestQuestActive = false
+            stopFlyNoclip()
+            hqLblNPC:Set(" NPC: -"); hqLblTgt:Set(" -"); hqLblProg:Set(" -")
+            Rayfield:Notify({Title="Harvest Quest", Content="Stopped.", Duration=2, Image=4483362458})
+        end
+    end})
+
+-- ─── BOTTOM: SLAYING QUESTS ──────────────────────────────────
+Tab5:CreateSection(" Slaying Quests (Combat / Kill)")
+local sqLblNPC  = Tab5:CreateLabel(" NPC: -")
+local sqLblTgt  = Tab5:CreateLabel(" Target: -")
+local sqLblProg = Tab5:CreateLabel(" Progress: -")
+Tab5:CreateDropdown({Name="Select Slay Quest", Options=slayingQuestNames, CurrentOption={"Select"}, MultipleOptions=false,
+    Callback=function(opt)
+        selectedSlayQuest = opt[1]
+        local info = QUEST_DATA[selectedSlayQuest]
+        if info then
+            sqLblNPC:Set(" NPC: "..selectedSlayQuest)
+            sqLblTgt:Set(" "..info.Target.." [Slaying] x"..info.Amount)
+            sqLblProg:Set(" Progress: -")
+            warnPathQuest(selectedSlayQuest)
+        end
+    end})
+Tab5:CreateToggle({Name="Loop Slay Quest", CurrentValue=false,
+    Callback=function(val) questLoopEnabled=val end})
+Tab5:CreateToggle({Name="Auto Farm Slay Quest", CurrentValue=false,
+    Callback=function(val)
+        if val then
+            if not selectedSlayQuest then
+                Rayfield:Notify({Title="Error", Content="Select a slay quest first!", Duration=3, Image=4483362458}); return
+            end
+            slayQuestActive = true
+            task.spawn(function() runSlayQuestFarm(sqLblNPC, sqLblTgt, sqLblProg) end)
+            Rayfield:Notify({Title="Slay Quest", Content="Started: "..selectedSlayQuest, Duration=3, Image=4483362458})
+        else
+            slayQuestActive = false
+            stopFlyNoclip()
+            sqLblNPC:Set(" NPC: -"); sqLblTgt:Set(" -"); sqLblProg:Set(" -")
+            Rayfield:Notify({Title="Slay Quest", Content="Stopped.", Duration=2, Image=4483362458})
+        end
+    end})
+
+-- 
+--   TAB 6 TRAINING/NPC  
+-- 
+local Tab6=Window:CreateTab(" Training/NPC",4483362458)
+Tab6:CreateSection(" Training Zones")
+if #trainingList>0 then
+    Tab6:CreateDropdown({Name="Training Zone",Options=trainingList,CurrentOption={"Select"},MultipleOptions=false,
+        Callback=function(opt) local zone=trainingData[opt[1]]; if zone then local cf=getCF(zone); if cf then flyTo(cf.Position,function() return true end) end end end})
+else Tab6:CreateLabel("No training zones found.") end
+Tab6:CreateSection(" NPC Teleport")
+local npcFolder=workspace:FindFirstChild("NPCs")
+if npcFolder then
+    local npcList={}; for _, npc in pairs(npcFolder:GetChildren()) do table.insert(npcList,npc.Name) end
+    if #npcList>0 then
+        Tab6:CreateDropdown({Name="Select NPC",Options=npcList,CurrentOption={"Select"},MultipleOptions=false,
+            Callback=function(opt) local npc=npcFolder:FindFirstChild(opt[1]); if npc then local cf=getCF(npc); if cf then flyTo(cf.Position,function() return true end) end end end})
+    else Tab6:CreateLabel("No NPCs found.") end
+else Tab6:CreateLabel("NPCs folder not found.") end
+
+-- 
+--   TAB 7 ALCHEMY  
+-- 
+local Tab7=Window:CreateTab(" Alchemy",4483362458)
+local alchLblReq       = Tab7:CreateLabel(" Requirement: -")
+local alchLblElem      = Tab7:CreateLabel(" Elements: -")
+local alchLblHerbsUsed = Tab7:CreateLabel(" Herbs used: -")
+local alchLblStatus    = Tab7:CreateLabel(" Status: Idle")
+local alchLblBaseCheck = Tab7:CreateLabel(" Base Value: Select a recipe and year first.")
+
+local function refreshAlchLbls()
+    if not selectedRecipe or not ALCHEMY_RECIPES[selectedRecipe] then return end
+    local r = ALCHEMY_RECIPES[selectedRecipe]
+    local herbUsed = {}
+    for _, element in ipairs(r.Elements) do
+        table.insert(herbUsed, getBestHerbForElement(element))
+    end
+    alchLblHerbsUsed:Set(" Herbs: "..table.concat(herbUsed," | "))
+    local total = calcRecipeBase(r, selectedAlchemyYear)
+    if total < r.Base then
+        alchLblBaseCheck:Set(string.format(" Base too low! Got ~%d, need %d",total,r.Base))
+    else
+        alchLblBaseCheck:Set(string.format(" Base OK: ~%d / %d required.",total,r.Base))
+    end
+end
+
+Tab7:CreateSection(" Recipe")
+Tab7:CreateDropdown({Name="Select Recipe",Options=recipeNames,CurrentOption={"Select"},MultipleOptions=false,
+    Callback=function(opt)
+        selectedRecipe=opt[1]; local r=ALCHEMY_RECIPES[selectedRecipe]
+        if r then
+            alchLblReq:Set(" Requirement: "..r.Requirement)
+            alchLblElem:Set(" Elements: "..table.concat(r.Elements," | "))
+            refreshAlchLbls()
+        end
+    end})
+
+Tab7:CreateSection(" Select Herb per Element")
+Tab7:CreateDropdown({Name="Earth herb",Options={"Taixian","Ginseng"},CurrentOption={"Taixian"},MultipleOptions=false,
+    Callback=function(opt) selectedElementHerb["Earth"]=opt[1]; refreshAlchLbls() end})
+Tab7:CreateDropdown({Name="Heaven herb",Options={"Moonlight Flower","Qilin Berries"},CurrentOption={"Moonlight Flower"},MultipleOptions=false,
+    Callback=function(opt) selectedElementHerb["Heaven"]=opt[1]; refreshAlchLbls() end})
+Tab7:CreateDropdown({Name="Yin herb",Options={"Yin Bush","Blood Flower","Twilight Bloom","Spirit Grass"},CurrentOption={"Yin Bush"},MultipleOptions=false,
+    Callback=function(opt) selectedElementHerb["Yin"]=opt[1]; refreshAlchLbls() end})
+Tab7:CreateDropdown({Name="Yang herb",Options={"Yang Flower","Lingzhi"},CurrentOption={"Yang Flower"},MultipleOptions=false,
+    Callback=function(opt) selectedElementHerb["Yang"]=opt[1]; refreshAlchLbls() end})
+
+Tab7:CreateSection(" Herb Year")
+Tab7:CreateDropdown({Name="Herb Year to Use",Options=YEAR_DISPLAY_LIST,CurrentOption={"Thousand Year Old"},MultipleOptions=false,
+    Callback=function(opt)
+        local pick=opt[1]; selectedAlchemyYear=YEAR_TO_VARIATION[pick] or "Thousand"
+        if selectedRecipe and ALCHEMY_RECIPES[selectedRecipe] then
+            local r=ALCHEMY_RECIPES[selectedRecipe]; local total=calcRecipeBase(r,selectedAlchemyYear)
+            if total<r.Base then
+                alchLblBaseCheck:Set(string.format(" Base too low! Got ~%d, need %d. Craft will FAIL!",total,r.Base))
+                Rayfield:Notify({Title=" Herb Year Too Low!",Content=string.format("%s needs base %d, herbs give ~%d. Will fail!",selectedRecipe,r.Base,total),Duration=5,Image=4483362458})
+            else
+                alchLblBaseCheck:Set(string.format(" Base OK: ~%d / %d required.",total,r.Base))
+            end
+            refreshAlchLbls()
+        end
+    end})
+
+Tab7:CreateSection(" Amount")
+Tab7:CreateDropdown({Name="Amount to Craft",Options={"1","2","5","25","100","1000"},CurrentOption={"1"},MultipleOptions=false,
+    Callback=function(opt) alchemyCraftAmount=tonumber(opt[1]) or 1 end})
+
+Tab7:CreateSection(" Craft")
+Tab7:CreateButton({Name=" Craft Once",
+    Callback=function()
+        if not selectedRecipe then Rayfield:Notify({Title="Alchemy",Content="Please select a recipe first!",Duration=3,Image=4483362458}); return end
+        if alchemyActive then Rayfield:Notify({Title="Alchemy",Content="Already crafting, please wait!",Duration=2,Image=4483362458}); return end
+        local r=ALCHEMY_RECIPES[selectedRecipe]
+        if r then
+            local total=calcRecipeBase(r,selectedAlchemyYear)
+            if total<r.Base then Rayfield:Notify({Title=" Base Value Too Low!",Content=string.format("Herbs give ~%d base but %s needs %d.",total,selectedRecipe,r.Base),Duration=6,Image=4483362458}); return end
+        end
+        alchemyActive=true
+        task.spawn(function() runAlchemy(alchLblStatus,false) end)
+    end})
+Tab7:CreateToggle({Name=" Auto Craft (Repeats until stopped)",CurrentValue=false,
+    Callback=function(val)
+        if val then
+            if not selectedRecipe then Rayfield:Notify({Title="Alchemy",Content="Please select a recipe first!",Duration=3,Image=4483362458}); return end
+            local r=ALCHEMY_RECIPES[selectedRecipe]
+            if r then
+                local total=calcRecipeBase(r,selectedAlchemyYear)
+                if total<r.Base then
+                    Rayfield:Notify({Title=" Base Value Too Low!",Content=string.format("Herbs give ~%d base but %s needs %d.",total,selectedRecipe,r.Base),Duration=6,Image=4483362458}); return
+                end
+            end
+            alchemyActive=true
+            task.spawn(function() while alchemyActive do runAlchemy(alchLblStatus,true); if alchemyActive then task.wait(0.5) end end end)
+            Rayfield:Notify({Title="Auto Craft ",Content="Auto crafting: "..selectedRecipe,Duration=3,Image=4483362458})
+        else
+            alchemyActive=false; alchLblStatus:Set(" Auto Craft Stopped")
+            Rayfield:Notify({Title="Auto Craft ",Content="Stopped",Duration=2,Image=4483362458})
+        end
+    end})
+Tab7:CreateButton({Name=" Stop Crafting",
+    Callback=function() alchemyActive=false; alchLblStatus:Set(" Stopped"); Rayfield:Notify({Title="Alchemy",Content="Stopped",Duration=2,Image=4483362458}) end})
+
+Tab7:CreateSection(" Recipe Reference")
+Tab7:CreateParagraph({Title="Breakthrough Pill",  Content="Base:40 | Earth+Earth+Earth+Earth | Herbs: Ginseng x4"})
+Tab7:CreateParagraph({Title="Restoration Pill",   Content="Base:50 | Earth+Earth+Earth+Yang | Herbs: Ginseng x3, Yang Flower x1"})
+Tab7:CreateParagraph({Title="Health Pill",        Content="Base:80 | Yin+Earth+Yang+Earth | Herbs: Yin Bush, Ginseng, Yang Flower, Ginseng"})
+Tab7:CreateParagraph({Title="Qi Pill",            Content="Base:80 | Heaven+Heaven+Earth+Yin | Herbs: Qilin Berries x2, Ginseng, Yin Bush"})
+Tab7:CreateParagraph({Title="Molian Pill",        Content="Base:150 | Yin+Yin+Yang+Heaven | Herbs: Yin Bush x2, Yang Flower, Qilin Berries"})
+Tab7:CreateParagraph({Title="Shulian Pill",       Content="Base:150 | Heaven x4 | Herbs: Qilin Berries x4"})
+Tab7:CreateParagraph({Title="Dragon Pill",        Content="Base:250 | Earth+Heaven+Yin+Yang | Herbs: Ginseng, Qilin Berries, Yin Bush, Yang Flower"})
+Tab7:CreateParagraph({Title="Tian Pill",          Content="Base:275 | Earth+Heaven+Heaven+Earth | Herbs: Ginseng, Qilin Berries x2, Ginseng"})
+Tab7:CreateParagraph({Title="Soul Breakthrough",  Content="Base:300 | Yin+Yang+Yin+Yang | Herbs: Yin Bush, Yang Flower, Yin Bush, Yang Flower"})
+Tab7:CreateParagraph({Title="Soul Energy Pill",   Content="Base:300 | Yin+Yin+Yang+Yang | Herbs: Yin Bush x2, Yang Flower x2"})
+Tab7:CreateParagraph({Title="Soul Chance Pill",   Content="Base:400 | Yang+Yang+Yin+Yin | Herbs: Yang Flower x2, Yin Bush x2"})
+Tab7:CreateParagraph({Title="Soul Cap Pill",      Content="Base:300 | Yang+Yin+Yang+Yin | Herbs: Yang Flower, Yin Bush, Yang Flower, Yin Bush"})
+
+-- 
+-- 
+--   TAB 8 SETTINGS  
+-- 
+-- 
+local Tab8=Window:CreateTab(" Settings",4483362458)
+
+-- Anti-AFK — auto ON when script loads
+local antiAfkEnabled = true
+local antiAfkConnection = nil
+
+local function startAntiAfk()
+    if antiAfkConnection then antiAfkConnection:Disconnect() end
+    
+    -- Method 1: VirtualUser (legacy fallback)
+    pcall(function()
+        local vu = game:GetService("VirtualUser")
+        Player.Idled:Connect(function()
+            if antiAfkEnabled then
+                vu:Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                task.wait(1)
+                vu:Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+            end
+        end)
+    end)
+    
+    -- Method 2: Character movement anti-AFK
+    antiAfkConnection = RunService.Heartbeat:Connect(function()
+        if antiAfkEnabled and Character and HRP then
+            if tick() % 60 < 0.1 then
+                pcall(function()
+                    local currentPos = HRP.Position
+                    HRP.CFrame = CFrame.new(currentPos + Vector3.new(0, 0.1, 0))
+                    task.wait(0.05)
+                    HRP.CFrame = CFrame.new(currentPos)
+                end)
+            end
+        end
+    end)
+end
+
+local function stopAntiAfk()
+    if antiAfkConnection then antiAfkConnection:Disconnect(); antiAfkConnection=nil end
+end
+
+startAntiAfk() -- Auto start on load
+
+Tab8:CreateSection(" Anti-AFK")
+Tab8:CreateToggle({Name="Anti-AFK",CurrentValue=true,
+    Callback=function(val)
+        antiAfkEnabled=val
+        if val then
+            startAntiAfk()
+            Rayfield:Notify({Title="Anti-AFK ",Content="Enabled",Duration=2,Image=4483362458})
+        else
+            stopAntiAfk()
+            Rayfield:Notify({Title="Anti-AFK ",Content="Disabled",Duration=2,Image=4483362458})
+        end
+    end})
+
+Tab8:CreateSection(" Fly Settings")
+Tab8:CreateSlider({Name="Fly Speed (studs/sec)",Range={50,500},Increment=10,CurrentValue=150,
+    Callback=function(val) flySpeed=val end})
+Tab8:CreateSection(" General")
+Tab8:CreateButton({Name=" Stop All Farms",
+    Callback=function() stopAll(); Rayfield:Notify({Title="Stopped",Content="All farms stopped.",Duration=2,Image=4483362458}) end})
+Tab8:CreateButton({Name=" Destroy GUI",
+    Callback=function() stopAll(); stopAntiAfk(); Rayfield:Destroy() end})
+
+-- ============================================================
+-- WELCOME
+-- ============================================================
+Rayfield:Notify({
+   Title="MELAYU-HUB",
+   Content="Loaded by SIGMA.",
+   Duration=6,
+   Image=4483362458,
+})

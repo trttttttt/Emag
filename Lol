@@ -1,0 +1,992 @@
+--[[
+╔══════════════════════════════════════════════════════════════╗
+║                    NexUI Library v3.0                        ║
+║          Custom Roblox UI Library — Config Save             ║
+║                                                              ║
+║  CARA PAKAI:                                                 ║
+║  local NexUI = loadstring(game:HttpGet("RAW_URL"))()         ║
+║                                                              ║
+║  local Window = NexUI:CreateWindow({                         ║
+║      Title      = "My Hub",                                  ║
+║      SubTitle   = "v1.0",                                    ║
+║      Icon       = "rbxassetid://0",                          ║
+║      ConfigSave = true,          -- auto save config         ║
+║      ConfigFile = "myhub.json",  -- nama file save           ║
+║  })                                                          ║
+║                                                              ║
+║  FEATURES:                                                   ║
+║  ✓ Config auto-save (writefile/readfile)                     ║
+║  ✓ Auto-load config bila open game                           ║
+║  ✓ Setiap element ada unique ID untuk save/load              ║
+║  ✓ Anti-AFK dalam Settings                                   ║
+║  ✓ Color Theme 8 pilihan (live recolor)                      ║
+║  ✓ Button Shape (Circle/Square/Diamond/Squircle)             ║
+║  ✓ UI Size & Button Size settings                            ║
+╚══════════════════════════════════════════════════════════════╝
+]]
+
+-- ════════════════════════════
+--          SERVICES
+-- ════════════════════════════
+local Players          = game:GetService("Players")
+local TweenService     = game:GetService("TweenService")
+local UserInputService = game:GetService("UserInputService")
+local RunService       = game:GetService("RunService")
+local CoreGui          = game:GetService("CoreGui")
+local HttpService      = game:GetService("HttpService")
+local VirtualUser      = game:GetService("VirtualUser")
+
+local LocalPlayer = Players.LocalPlayer
+
+-- ════════════════════════════
+--          UTILITIES
+-- ════════════════════════════
+local function Tween(obj, props, t, style, dir)
+    TweenService:Create(obj,
+        TweenInfo.new(t or 0.22,
+            style or Enum.EasingStyle.Quart,
+            dir   or Enum.EasingDirection.Out
+        ), props):Play()
+end
+
+local function New(class, props, children)
+    local o = Instance.new(class)
+    for k, v in pairs(props or {}) do
+        if k ~= "Parent" then o[k] = v end
+    end
+    for _, c in pairs(children or {}) do c.Parent = o end
+    if props and props.Parent then o.Parent = props.Parent end
+    return o
+end
+
+local function MakeDraggable(frame, handle)
+    local dragging, dragStart, startPos
+    handle.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging  = true
+            dragStart = input.Position
+            startPos  = frame.Position
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and input.UserInputType == Enum.UserInputType.MouseMovement then
+            local delta = input.Position - dragStart
+            frame.Position = UDim2.new(
+                startPos.X.Scale, startPos.X.Offset + delta.X,
+                startPos.Y.Scale, startPos.Y.Offset + delta.Y
+            )
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+end
+
+-- ════════════════════════════
+--       CONFIG SAVE SYSTEM
+-- ════════════════════════════
+local ConfigSystem = {}
+ConfigSystem.__index = ConfigSystem
+
+function ConfigSystem.new(fileName, enabled)
+    local self = setmetatable({}, ConfigSystem)
+    self._file    = fileName or "nexui_config.json"
+    self._enabled = enabled ~= false
+    self._data    = {}
+    self._callbacks = {} -- id -> set function
+    if self._enabled then
+        self:Load()
+    end
+    return self
+end
+
+function ConfigSystem:Load()
+    if not self._enabled then return end
+    local ok, raw = pcall(readfile, self._file)
+    if ok and raw and raw ~= "" then
+        local ok2, decoded = pcall(function()
+            return HttpService:JSONDecode(raw)
+        end)
+        if ok2 and type(decoded) == "table" then
+            self._data = decoded
+        end
+    end
+end
+
+function ConfigSystem:Save()
+    if not self._enabled then return end
+    local ok, encoded = pcall(function()
+        return HttpService:JSONEncode(self._data)
+    end)
+    if ok then
+        pcall(writefile, self._file, encoded)
+    end
+end
+
+function ConfigSystem:Set(id, value)
+    self._data[id] = value
+    self:Save()
+end
+
+function ConfigSystem:Get(id, default)
+    local v = self._data[id]
+    if v == nil then return default end
+    return v
+end
+
+function ConfigSystem:Register(id, setFn)
+    self._callbacks[id] = setFn
+end
+
+function ConfigSystem:ApplyAll()
+    -- Apply loaded config to all registered elements
+    for id, setFn in pairs(self._callbacks) do
+        local val = self._data[id]
+        if val ~= nil then
+            pcall(setFn, val)
+        end
+    end
+end
+
+function ConfigSystem:Reset()
+    self._data = {}
+    self:Save()
+    -- Reapply defaults by re-loading (data now empty, defaults kick in)
+end
+
+-- ════════════════════════════
+--          THEME
+-- ════════════════════════════
+local Theme = {
+    Bg         = Color3.fromRGB(12,  14,  22),
+    Sidebar    = Color3.fromRGB( 8,  10,  17),
+    TopBar     = Color3.fromRGB(16,  18,  28),
+    Element    = Color3.fromRGB(20,  23,  36),
+    ElementHov = Color3.fromRGB(28,  32,  50),
+    Border     = Color3.fromRGB(40,  44,  70),
+    Accent     = Color3.fromRGB(99, 102, 241),
+    AccentDim  = Color3.fromRGB(60,  63, 160),
+    Text       = Color3.fromRGB(225, 228, 245),
+    SubText    = Color3.fromRGB(120, 125, 165),
+    ToggleOn   = Color3.fromRGB( 99, 102, 241),
+    ToggleOff  = Color3.fromRGB( 40,  44,  70),
+    Success    = Color3.fromRGB( 34, 197,  94),
+    Danger     = Color3.fromRGB(236,  72, 153),
+    White      = Color3.fromRGB(255, 255, 255),
+}
+
+local ColorPresets = {
+    Indigo = { Accent=Color3.fromRGB(99,102,241),  AccentDim=Color3.fromRGB(60,63,160),   ToggleOn=Color3.fromRGB(99,102,241)  },
+    Pink   = { Accent=Color3.fromRGB(236,72,153),  AccentDim=Color3.fromRGB(180,40,110),  ToggleOn=Color3.fromRGB(236,72,153)  },
+    Cyan   = { Accent=Color3.fromRGB(34,211,238),  AccentDim=Color3.fromRGB(14,150,180),  ToggleOn=Color3.fromRGB(34,211,238)  },
+    Green  = { Accent=Color3.fromRGB(34,197,94),   AccentDim=Color3.fromRGB(20,140,60),   ToggleOn=Color3.fromRGB(34,197,94)   },
+    Orange = { Accent=Color3.fromRGB(249,115,22),  AccentDim=Color3.fromRGB(180,75,10),   ToggleOn=Color3.fromRGB(249,115,22)  },
+    Red    = { Accent=Color3.fromRGB(239,68,68),   AccentDim=Color3.fromRGB(170,30,30),   ToggleOn=Color3.fromRGB(239,68,68)   },
+    Yellow = { Accent=Color3.fromRGB(234,179,8),   AccentDim=Color3.fromRGB(160,120,5),   ToggleOn=Color3.fromRGB(234,179,8)   },
+    White  = { Accent=Color3.fromRGB(220,220,230), AccentDim=Color3.fromRGB(160,160,170), ToggleOn=Color3.fromRGB(220,220,230) },
+}
+
+local AccentObjects = {}
+local function TrackAccent(obj, prop)
+    table.insert(AccentObjects, {obj=obj, prop=prop})
+end
+
+local function ApplyColorTheme(preset)
+    local p = ColorPresets[preset]
+    if not p then return end
+    Theme.Accent    = p.Accent
+    Theme.AccentDim = p.AccentDim
+    Theme.ToggleOn  = p.ToggleOn
+    for _, e in ipairs(AccentObjects) do
+        pcall(function() Tween(e.obj, {[e.prop]=p.Accent}, 0.3) end)
+    end
+end
+
+-- ════════════════════════════
+--       ICON HELPER
+-- ════════════════════════════
+local function SetIcon(img, id)
+    if not id or id == "" then return end
+    local clean = tostring(id):gsub("rbxassetid://","")
+    if tonumber(clean) and tonumber(clean) ~= 0 then
+        img.Image = "rbxassetid://"..clean
+    end
+end
+
+-- ════════════════════════════
+--       NOTIFICATION
+-- ════════════════════════════
+local NotifHolder
+local function Notify(title, desc, duration)
+    duration = duration or 3
+    if not NotifHolder then return end
+    local n = New("Frame",{
+        Parent=NotifHolder, Size=UDim2.new(1,0,0,64),
+        BackgroundColor3=Theme.Element, BorderSizePixel=0,
+        BackgroundTransparency=1,
+    },{
+        New("UICorner",{CornerRadius=UDim.new(0,10)}),
+        New("UIStroke",{Color=Theme.Accent,Thickness=1,Transparency=0.5}),
+        New("UIPadding",{PaddingTop=UDim.new(0,10),PaddingBottom=UDim.new(0,10),PaddingLeft=UDim.new(0,12),PaddingRight=UDim.new(0,12)}),
+        New("TextLabel",{Text=title,Font=Enum.Font.GothamBold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,0,0,18)}),
+        New("TextLabel",{Text=desc or "",Font=Enum.Font.Gotham,TextSize=11,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,0,0,16),Position=UDim2.new(0,0,0,22),TextWrapped=true}),
+    })
+    Tween(n,{BackgroundTransparency=0},0.25)
+    task.delay(duration, function()
+        Tween(n,{BackgroundTransparency=1,Size=UDim2.new(1,0,0,0)},0.3)
+        task.delay(0.35, function() pcall(function() n:Destroy() end) end)
+    end)
+end
+
+-- ════════════════════════════════════════════════════════
+--                  MAIN LIBRARY
+-- ════════════════════════════════════════════════════════
+local NexUI   = {}
+NexUI.__index = NexUI
+
+function NexUI:CreateWindow(config)
+    config = config or {}
+    local title      = config.Title      or "NexUI"
+    local subtitle   = config.SubTitle   or "v3.0"
+    local iconId     = config.Icon       or ""
+    local cfgEnabled = config.ConfigSave ~= false -- default true
+    local cfgFile    = config.ConfigFile or "nexui_config.json"
+
+    -- Init config system
+    local Config = ConfigSystem.new(cfgFile, cfgEnabled)
+
+    pcall(function()
+        if CoreGui:FindFirstChild("NexUI_Gui") then CoreGui.NexUI_Gui:Destroy() end
+    end)
+
+    local ScreenGui = New("ScreenGui",{
+        Name="NexUI_Gui", Parent=CoreGui,
+        ResetOnSpawn=false, ZIndexBehavior=Enum.ZIndexBehavior.Sibling,
+    })
+
+    NotifHolder = New("Frame",{
+        Parent=ScreenGui, Size=UDim2.new(0,260,1,0),
+        Position=UDim2.new(1,-270,0,0), BackgroundTransparency=1,
+    },{
+        New("UIListLayout",{Padding=UDim.new(0,8),VerticalAlignment=Enum.VerticalAlignment.Bottom,FillDirection=Enum.FillDirection.Vertical,SortOrder=Enum.SortOrder.LayoutOrder}),
+        New("UIPadding",{PaddingBottom=UDim.new(0,16)}),
+    })
+
+    -- ════════════════════════════
+    --      DRAG BUTTON
+    -- ════════════════════════════
+    local DragBtnFrame = New("Frame",{
+        Parent=ScreenGui, Size=UDim2.new(0,52,0,52),
+        Position=UDim2.new(0,36,0,36),
+        BackgroundTransparency=1, ZIndex=10,
+    })
+
+    local DragBtnShape = New("Frame",{
+        Parent=DragBtnFrame, Size=UDim2.new(1,0,1,0),
+        BackgroundColor3=Theme.Accent, ZIndex=10,
+    })
+    TrackAccent(DragBtnShape,"BackgroundColor3")
+    local _corner = New("UICorner",{CornerRadius=UDim.new(1,0), Parent=DragBtnShape})
+    New("UIGradient",{
+        Color=ColorSequence.new{
+            ColorSequenceKeypoint.new(0,Color3.fromRGB(99,102,241)),
+            ColorSequenceKeypoint.new(1,Color3.fromRGB(180,80,220)),
+        },
+        Rotation=135, Parent=DragBtnShape,
+    })
+    New("UIStroke",{Color=Color3.fromRGB(130,130,255),Thickness=1.5,Transparency=0.5,Parent=DragBtnShape})
+
+    local DragBtnIcon = New("ImageLabel",{
+        Parent=DragBtnShape, Size=UDim2.new(0,28,0,28),
+        Position=UDim2.new(0.5,0,0.5,0), AnchorPoint=Vector2.new(0.5,0.5),
+        BackgroundTransparency=1, Image="rbxassetid://7059346373", ZIndex=11,
+    })
+    SetIcon(DragBtnIcon, iconId)
+
+    local PulseRing = New("Frame",{Parent=DragBtnFrame,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+    local pulseStroke = New("UIStroke",{Color=Theme.Accent,Thickness=1.5,Transparency=0.3,Parent=PulseRing})
+    TrackAccent(pulseStroke,"Color")
+
+    task.spawn(function()
+        while DragBtnFrame and DragBtnFrame.Parent do
+            Tween(PulseRing,{Size=UDim2.new(1.6,0,1.6,0),Position=UDim2.new(-0.3,0,-0.3,0)},0.001)
+            Tween(pulseStroke,{Transparency=0.2},0.001)
+            task.wait(0.05)
+            Tween(PulseRing,{Size=UDim2.new(1.8,0,1.8,0),Position=UDim2.new(-0.4,0,-0.4,0)},1.8)
+            Tween(pulseStroke,{Transparency=1},1.8)
+            task.wait(2.2)
+        end
+    end)
+
+    MakeDraggable(DragBtnFrame, DragBtnShape)
+
+    -- ════════════════════════════
+    --       MAIN WINDOW
+    -- ════════════════════════════
+    local MainFrame = New("Frame",{
+        Parent=ScreenGui, Size=UDim2.new(0,860,0,560),
+        Position=UDim2.new(0.5,-430,0.5,-280),
+        BackgroundColor3=Theme.Bg, BorderSizePixel=0,
+        Visible=false, ZIndex=5, ClipsDescendants=true,
+    },{
+        New("UICorner",{CornerRadius=UDim.new(0,18)}),
+        New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.4}),
+    })
+    New("ImageLabel",{
+        Parent=MainFrame, Size=UDim2.new(1,40,1,40),
+        Position=UDim2.new(0,-20,0,-20), BackgroundTransparency=1,
+        Image="rbxassetid://6014261993", ImageColor3=Color3.new(),
+        ImageTransparency=0.5, ScaleType=Enum.ScaleType.Slice,
+        SliceCenter=Rect.new(49,49,450,450), ZIndex=4,
+    })
+
+    -- ── TOP BAR ──
+    local TopBar = New("Frame",{
+        Parent=MainFrame, Size=UDim2.new(1,0,0,44),
+        BackgroundColor3=Theme.TopBar, BorderSizePixel=0, ZIndex=6,
+    },{
+        New("UICorner",{CornerRadius=UDim.new(0,18)}),
+        New("Frame",{Size=UDim2.new(1,0,0.5,0),Position=UDim2.new(0,0,0.5,0),BackgroundColor3=Theme.TopBar,BorderSizePixel=0,ZIndex=6}),
+    })
+
+    local WinIcon = New("ImageLabel",{Parent=TopBar,Size=UDim2.new(0,26,0,26),Position=UDim2.new(0,14,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,Image="rbxassetid://7059346373",ZIndex=7})
+    SetIcon(WinIcon, iconId)
+    New("TextLabel",{Parent=TopBar,Text=title,Font=Enum.Font.GothamBold,TextSize=14,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0,200,1,0),Position=UDim2.new(0,46,0,0),ZIndex=7})
+    New("TextLabel",{Parent=TopBar,Text=subtitle,Font=Enum.Font.Gotham,TextSize=11,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0,200,1,0),Position=UDim2.new(0,46,-0.05,14),ZIndex=7})
+
+    local CloseBtn = New("TextButton",{Parent=TopBar,Text="✕",Font=Enum.Font.GothamBold,TextSize=14,TextColor3=Theme.SubText,BackgroundTransparency=1,Size=UDim2.new(0,36,1,0),Position=UDim2.new(1,-42,0,0),ZIndex=7})
+    CloseBtn.MouseButton1Click:Connect(function()
+        Tween(MainFrame,{Size=UDim2.new(0,860,0,0)},0.3)
+        task.delay(0.31,function() MainFrame.Visible=false end)
+    end)
+    CloseBtn.MouseEnter:Connect(function() Tween(CloseBtn,{TextColor3=Theme.Danger},0.15) end)
+    CloseBtn.MouseLeave:Connect(function() Tween(CloseBtn,{TextColor3=Theme.SubText},0.15) end)
+
+    local minBtn = New("TextButton",{Parent=TopBar,Text="−",Font=Enum.Font.GothamBold,TextSize=18,TextColor3=Theme.SubText,BackgroundTransparency=1,Size=UDim2.new(0,36,1,0),Position=UDim2.new(1,-80,0,0),ZIndex=7})
+    local minimized = false
+    minBtn.MouseButton1Click:Connect(function()
+        minimized = not minimized
+        Tween(MainFrame,{Size=UDim2.new(0,MainFrame.AbsoluteSize.X,0,minimized and 44 or 560)},0.3)
+    end)
+
+    MakeDraggable(MainFrame, TopBar)
+
+    local ContentHolder = New("Frame",{
+        Parent=MainFrame,Size=UDim2.new(1,0,1,-44),Position=UDim2.new(0,0,0,44),
+        BackgroundTransparency=1,BorderSizePixel=0,ZIndex=5,ClipsDescendants=true,
+    })
+
+    -- ── SIDEBAR ──
+    local Sidebar = New("ScrollingFrame",{
+        Parent=ContentHolder,Size=UDim2.new(0,200,1,-52),Position=UDim2.new(0,0,0,0),
+        BackgroundColor3=Theme.Sidebar,BorderSizePixel=0,
+        ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,
+        CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        ZIndex=6,ClipsDescendants=true,
+    },{
+        New("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder}),
+        New("UIPadding",{PaddingTop=UDim.new(0,8),PaddingLeft=UDim.new(0,6),PaddingRight=UDim.new(0,6)}),
+    })
+    TrackAccent(Sidebar,"ScrollBarImageColor3")
+    New("Frame",{Parent=ContentHolder,Size=UDim2.new(0,1,1,0),Position=UDim2.new(0,200,0,0),BackgroundColor3=Theme.Border,BorderSizePixel=0,ZIndex=6})
+
+    local SidebarBottom = New("Frame",{Parent=ContentHolder,Size=UDim2.new(0,200,0,52),Position=UDim2.new(0,0,1,-52),BackgroundColor3=Theme.Sidebar,BorderSizePixel=0,ZIndex=7})
+    New("Frame",{Parent=SidebarBottom,Size=UDim2.new(1,0,0,1),BackgroundColor3=Theme.Border,BorderSizePixel=0,ZIndex=7})
+
+    local PageContainer = New("Frame",{
+        Parent=ContentHolder,Size=UDim2.new(1,-200,1,0),Position=UDim2.new(0,200,0,0),
+        BackgroundColor3=Theme.Bg,BorderSizePixel=0,ZIndex=5,ClipsDescendants=true,
+    })
+
+    -- ════════════════════════════
+    --    OPEN / CLOSE
+    -- ════════════════════════════
+    local isOpen = false
+    DragBtnShape.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            isOpen = not isOpen
+            if isOpen then
+                MainFrame.Size    = UDim2.new(0,860,0,0)
+                MainFrame.Visible = true
+                Tween(MainFrame,{Size=UDim2.new(0,860,0,560)},0.35,Enum.EasingStyle.Back)
+            else
+                Tween(MainFrame,{Size=UDim2.new(0,860,0,0)},0.25)
+                task.delay(0.26,function() MainFrame.Visible=false end)
+            end
+        end
+    end)
+
+    -- ════════════════════════════════════════════════════════
+    --  SHARED ELEMENT BUILDERS
+    --  (pass Config so each element auto-saves & auto-loads)
+    -- ════════════════════════════════════════════════════════
+
+    -- Generate unique ID from name + page path
+    local function MakeID(page, name)
+        return tostring(page):sub(-8) .. "_" .. (name or "el"):gsub("%s","_"):lower()
+    end
+
+    local function MakeToggle(page, cfg)
+        cfg = cfg or {}
+        local name    = cfg.Name     or "Toggle"
+        local default = cfg.Default  or false
+        local cb      = cfg.Callback or function() end
+        local id      = cfg.ID       or MakeID(page, name)
+        -- Load saved value
+        local state   = Config:Get(id, default)
+
+        local C = New("Frame",{Parent=page,Size=UDim2.new(1,0,0,50),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+        New("TextLabel",{Parent=C,Text=name,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-70,1,0),Position=UDim2.new(0,14,0,0),ZIndex=8})
+        local Tr = New("Frame",{Parent=C,Size=UDim2.new(0,42,0,22),Position=UDim2.new(1,-56,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=state and Theme.ToggleOn or Theme.ToggleOff,BorderSizePixel=0,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+        TrackAccent(Tr,"BackgroundColor3")
+        local Th = New("Frame",{Parent=Tr,Size=UDim2.new(0,16,0,16),Position=state and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=Theme.White,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+
+        -- Config save indicator dot
+        if cfgEnabled then
+            New("Frame",{Parent=C,Size=UDim2.new(0,5,0,5),Position=UDim2.new(0,5,0,5),BackgroundColor3=Theme.Success,BorderSizePixel=0,ZIndex=9,Visible=false},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+        end
+
+        local function SetState(v, silent)
+            state = v
+            Tween(Tr,{BackgroundColor3=v and Theme.ToggleOn or Theme.ToggleOff},0.2)
+            Tween(Th,{Position=v and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0)},0.2)
+            Config:Set(id, v)
+            if not silent then pcall(cb, v) end
+        end
+
+        New("TextButton",{Parent=C,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=10}).MouseButton1Click:Connect(function()
+            SetState(not state)
+        end)
+        C.MouseEnter:Connect(function() Tween(C,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        C.MouseLeave:Connect(function() Tween(C,{BackgroundColor3=Theme.Element},0.15) end)
+
+        -- Register for config apply
+        Config:Register(id, function(v) SetState(v, true) end)
+        -- Fire callback with loaded value
+        if state ~= default then pcall(cb, state) end
+
+        local o = {}
+        function o:Set(v) SetState(v) end
+        function o:Get() return state end
+        return o
+    end
+
+    local function MakeSlider(page, cfg)
+        cfg = cfg or {}
+        local name    = cfg.Name     or "Slider"
+        local mn      = cfg.Min      or 0
+        local mx      = cfg.Max      or 100
+        local default = cfg.Default  or mn
+        local dec     = cfg.Decimals or 0
+        local suf     = cfg.Suffix   or ""
+        local cb      = cfg.Callback or function() end
+        local id      = cfg.ID       or MakeID(page, name)
+        local val     = math.clamp(Config:Get(id, default), mn, mx)
+
+        local C = New("Frame",{Parent=page,Size=UDim2.new(1,0,0,64),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+        New("TextLabel",{Parent=C,Text=name,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0.6,0,0,24),Position=UDim2.new(0,14,0,8),ZIndex=8})
+        local VL = New("TextLabel",{Parent=C,Text=tostring(val)..suf,Font=Enum.Font.GothamMono,TextSize=12,TextColor3=Theme.Accent,TextXAlignment=Enum.TextXAlignment.Right,BackgroundTransparency=1,Size=UDim2.new(0.38,0,0,24),Position=UDim2.new(0.6,0,0,8),ZIndex=8})
+        TrackAccent(VL,"TextColor3")
+        local TB = New("Frame",{Parent=C,Size=UDim2.new(1,-28,0,5),Position=UDim2.new(0,14,0,42),BackgroundColor3=Theme.Border,BorderSizePixel=0,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+        local pct = (val-mn)/(mx-mn)
+        local Fi = New("Frame",{Parent=TB,Size=UDim2.new(pct,0,1,0),BackgroundColor3=Theme.Accent,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+        TrackAccent(Fi,"BackgroundColor3")
+        local Tm = New("Frame",{Parent=TB,Size=UDim2.new(0,14,0,14),Position=UDim2.new(pct,0,0.5,0),AnchorPoint=Vector2.new(0.5,0.5),BackgroundColor3=Theme.White,BorderSizePixel=0,ZIndex=10},{New("UICorner",{CornerRadius=UDim.new(1,0)}),New("UIStroke",{Color=Theme.Accent,Thickness=2})})
+
+        local function SetVal(v, silent)
+            val = math.clamp(v, mn, mx)
+            local r = (val-mn)/(mx-mn)
+            Fi.Size = UDim2.new(r,0,1,0)
+            Tm.Position = UDim2.new(r,0,0.5,0)
+            VL.Text = tostring(val)..suf
+            Config:Set(id, val)
+            if not silent then pcall(cb, val) end
+        end
+
+        local sl = false
+        local function Upd(x)
+            local r = math.clamp((x-TB.AbsolutePosition.X)/TB.AbsoluteSize.X,0,1)
+            SetVal(math.floor((mn+(mx-mn)*r)*(10^dec)+0.5)/(10^dec))
+        end
+        New("TextButton",{Parent=TB,Size=UDim2.new(1,0,0,20),Position=UDim2.new(0,0,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,Text="",ZIndex=11}).MouseButton1Down:Connect(function(x) sl=true; Upd(x) end)
+        UserInputService.InputChanged:Connect(function(i) if sl and i.UserInputType==Enum.UserInputType.MouseMovement then Upd(i.Position.X) end end)
+        UserInputService.InputEnded:Connect(function(i) if i.UserInputType==Enum.UserInputType.MouseButton1 then sl=false end end)
+        C.MouseEnter:Connect(function() Tween(C,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        C.MouseLeave:Connect(function() Tween(C,{BackgroundColor3=Theme.Element},0.15) end)
+
+        Config:Register(id, function(v) SetVal(v, true) end)
+        if val ~= default then pcall(cb, val) end
+
+        local o = {}
+        function o:Set(v) SetVal(v) end
+        function o:Get() return val end
+        return o
+    end
+
+    local function MakeButton(page, cfg)
+        cfg = cfg or {}
+        local name = cfg.Name        or "Button"
+        local desc = cfg.Description or ""
+        local cb   = cfg.Callback    or function() end
+        local h    = desc ~= "" and 62 or 50
+        local C = New("Frame",{Parent=page,Size=UDim2.new(1,0,0,h),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+        New("TextLabel",{Parent=C,Text=name,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-100,0,26),Position=UDim2.new(0,14,0,desc~="" and 6 or 0),ZIndex=8})
+        if desc~="" then New("TextLabel",{Parent=C,Text=desc,Font=Enum.Font.Gotham,TextSize=11,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-100,0,14),Position=UDim2.new(0,14,0,28),ZIndex=8}) end
+        local Btn = New("TextButton",{Parent=C,Text="RUN",Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Theme.White,BackgroundColor3=Theme.Accent,BorderSizePixel=0,Size=UDim2.new(0,60,0,28),Position=UDim2.new(1,-74,0.5,0),AnchorPoint=Vector2.new(0,0.5),ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,7)})})
+        TrackAccent(Btn,"BackgroundColor3")
+        Btn.MouseButton1Click:Connect(function() Tween(Btn,{BackgroundColor3=Theme.AccentDim},0.1); task.delay(0.15,function() Tween(Btn,{BackgroundColor3=Theme.Accent},0.2) end); pcall(cb) end)
+        C.MouseEnter:Connect(function() Tween(C,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        C.MouseLeave:Connect(function() Tween(C,{BackgroundColor3=Theme.Element},0.15) end)
+    end
+
+    local function MakeDropdown(page, cfg)
+        cfg = cfg or {}
+        local name = cfg.Name     or "Dropdown"
+        local opts = cfg.Options  or {}
+        local def  = cfg.Default  or (opts[1] or "")
+        local cb   = cfg.Callback or function() end
+        local id   = cfg.ID       or MakeID(page, name)
+        local sel  = Config:Get(id, def)
+        local open = false
+
+        local C = New("Frame",{Parent=page,Size=UDim2.new(1,0,0,50),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7,ClipsDescendants=true},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+        New("TextLabel",{Parent=C,Text=name,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0.5,0,0,50),Position=UDim2.new(0,14,0,0),ZIndex=8})
+        local SL = New("TextLabel",{Parent=C,Text=tostring(sel),Font=Enum.Font.Gotham,TextSize=12,TextColor3=Theme.Accent,TextXAlignment=Enum.TextXAlignment.Right,BackgroundTransparency=1,Size=UDim2.new(0.42,0,0,50),Position=UDim2.new(0.5,0,0,0),ZIndex=8,TextTruncate=Enum.TextTruncate.AtEnd})
+        TrackAccent(SL,"TextColor3")
+        local AL = New("TextLabel",{Parent=C,Text="▼",Font=Enum.Font.GothamBold,TextSize=9,TextColor3=Theme.SubText,BackgroundTransparency=1,Size=UDim2.new(0,20,0,50),Position=UDim2.new(1,-22,0,0),ZIndex=8})
+        local DL = New("Frame",{Parent=C,Size=UDim2.new(1,-4,0,0),Position=UDim2.new(0,2,0,52),BackgroundColor3=Theme.ElementHov,BorderSizePixel=0,ZIndex=9,ClipsDescendants=true},{New("UICorner",{CornerRadius=UDim.new(0,8)}),New("UIListLayout",{Padding=UDim.new(0,2),SortOrder=Enum.SortOrder.LayoutOrder}),New("UIPadding",{PaddingTop=UDim.new(0,4),PaddingBottom=UDim.new(0,4)})})
+
+        local function SetSel(v, silent)
+            sel = v; SL.Text = tostring(v)
+            Config:Set(id, v)
+            if not silent then pcall(cb, v) end
+        end
+
+        for _, opt in ipairs(opts) do
+            local OB = New("TextButton",{Parent=DL,Text="  "..tostring(opt),Font=Enum.Font.Gotham,TextSize=12,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundColor3=Theme.ElementHov,BackgroundTransparency=1,BorderSizePixel=0,Size=UDim2.new(1,0,0,28),ZIndex=10})
+            OB.MouseButton1Click:Connect(function()
+                SetSel(opt)
+                open=false; Tween(C,{Size=UDim2.new(1,0,0,50)},0.25); Tween(AL,{Rotation=0},0.2); Tween(DL,{Size=UDim2.new(1,-4,0,0)},0.2)
+            end)
+            OB.MouseEnter:Connect(function() Tween(OB,{BackgroundTransparency=0.7,TextColor3=Theme.Text},0.12) end)
+            OB.MouseLeave:Connect(function() Tween(OB,{BackgroundTransparency=1,TextColor3=Theme.SubText},0.12) end)
+        end
+
+        local optH = #opts*30+8
+        New("TextButton",{Parent=C,Size=UDim2.new(1,0,0,50),BackgroundTransparency=1,Text="",ZIndex=11}).MouseButton1Click:Connect(function()
+            open=not open; Tween(C,{Size=UDim2.new(1,0,0,open and 50+optH+6 or 50)},0.25); Tween(AL,{Rotation=open and 180 or 0},0.2); Tween(DL,{Size=UDim2.new(1,-4,0,open and optH or 0)},0.25)
+        end)
+        C.MouseEnter:Connect(function() Tween(C,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        C.MouseLeave:Connect(function() Tween(C,{BackgroundColor3=Theme.Element},0.15) end)
+
+        Config:Register(id, function(v) SetSel(v, true) end)
+        if sel ~= def then pcall(cb, sel) end
+
+        local o = {}
+        function o:Set(v) SetSel(v) end
+        function o:Get() return sel end
+        return o
+    end
+
+    local function MakeInput(page, cfg)
+        cfg = cfg or {}
+        local name    = cfg.Name        or "Input"
+        local ph      = cfg.Placeholder or "Type..."
+        local default = cfg.Default     or ""
+        local cb      = cfg.Callback    or function() end
+        local onEnter = cfg.OnEnter     or false
+        local id      = cfg.ID          or MakeID(page, name)
+        local saved   = Config:Get(id, default)
+
+        local C = New("Frame",{Parent=page,Size=UDim2.new(1,0,0,64),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+        New("TextLabel",{Parent=C,Text=name,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-28,0,22),Position=UDim2.new(0,14,0,8),ZIndex=8})
+        local IB = New("TextBox",{Parent=C,Text=saved,PlaceholderText=ph,Font=Enum.Font.GothamMono,TextSize=12,TextColor3=Theme.Text,PlaceholderColor3=Theme.SubText,BackgroundColor3=Theme.Bg,BorderSizePixel=0,Size=UDim2.new(1,-28,0,26),Position=UDim2.new(0,14,0,32),ClearTextOnFocus=false,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,6)}),New("UIPadding",{PaddingLeft=UDim.new(0,8)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.4})})
+        IB.Focused:Connect(function() Tween(IB,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        IB.FocusLost:Connect(function(e)
+            Tween(IB,{BackgroundColor3=Theme.Bg},0.15)
+            Config:Set(id, IB.Text)
+            if onEnter and not e then return end
+            pcall(cb, IB.Text)
+        end)
+        if not onEnter then
+            IB:GetPropertyChangedSignal("Text"):Connect(function()
+                Config:Set(id, IB.Text)
+                pcall(cb, IB.Text)
+            end)
+        end
+        C.MouseEnter:Connect(function() Tween(C,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        C.MouseLeave:Connect(function() Tween(C,{BackgroundColor3=Theme.Element},0.15) end)
+
+        local o = {}
+        function o:Set(v) IB.Text=tostring(v); Config:Set(id,v) end
+        function o:Get() return IB.Text end
+        return o
+    end
+
+    local function MakeSection(page, name)
+        New("TextLabel",{Parent=page,Text=string.upper(name or "SECTION"),Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Theme.Accent,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,0,0,20),ZIndex=7})
+    end
+
+    local function MakeLabel(page, txt)
+        New("TextLabel",{Parent=page,Text=txt or "",Font=Enum.Font.Gotham,TextSize=12,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,TextWrapped=true,Size=UDim2.new(1,0,0,0),AutomaticSize=Enum.AutomaticSize.Y,ZIndex=7})
+    end
+
+    -- ════════════════════════════════════════════════════════
+    --  SETTINGS PAGE
+    -- ════════════════════════════════════════════════════════
+    local SettingsPage = New("ScrollingFrame",{
+        Parent=PageContainer,Size=UDim2.new(1,0,1,0),
+        BackgroundTransparency=1,BorderSizePixel=0,
+        ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,
+        CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,
+        Visible=false,ZIndex=6,
+    },{
+        New("UIListLayout",{Padding=UDim.new(0,10),SortOrder=Enum.SortOrder.LayoutOrder}),
+        New("UIPadding",{PaddingTop=UDim.new(0,16),PaddingLeft=UDim.new(0,16),PaddingRight=UDim.new(0,16),PaddingBottom=UDim.new(0,16)}),
+    })
+    TrackAccent(SettingsPage,"ScrollBarImageColor3")
+
+    local function SCard(parent, h)
+        return New("Frame",{Parent=parent,Size=UDim2.new(1,0,0,h or 50),BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=7},{New("UICorner",{CornerRadius=UDim.new(0,10)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.6})})
+    end
+    local function SHdr(parent, txt)
+        New("TextLabel",{Parent=parent,Text="── "..string.upper(txt).." ──",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Theme.Accent,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,0,0,20),ZIndex=7})
+    end
+    local function SRow(parent, txt, sub)
+        New("TextLabel",{Parent=parent,Text=txt,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0.55,0,0,sub and 26 or 50),Position=UDim2.new(0,14,0,0),ZIndex=8})
+        if sub then New("TextLabel",{Parent=parent,Text=sub,Font=Enum.Font.Gotham,TextSize=11,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0.55,0,0,16),Position=UDim2.new(0,14,0,26),ZIndex=8}) end
+    end
+    local function SBtnRow(parent, items, active_default, w, onSelect)
+        local totalW = #items * (w or 44) + (#items-1) * 4
+        local holder = New("Frame",{Parent=parent,Size=UDim2.new(0,totalW,0,30),Position=UDim2.new(1,-(totalW+10),0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,ZIndex=8},{New("UIListLayout",{Padding=UDim.new(0,4),FillDirection=Enum.FillDirection.Horizontal,VerticalAlignment=Enum.VerticalAlignment.Center})})
+        local activeB
+        for _, item in ipairs(items) do
+            local b = New("TextButton",{Parent=holder,Text=item,Font=Enum.Font.GothamBold,TextSize=11,TextColor3=Theme.SubText,BackgroundColor3=Theme.Bg,BorderSizePixel=0,Size=UDim2.new(0,w or 44,1,0),ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(0,6)})})
+            if item == active_default then activeB=b; b.BackgroundColor3=Theme.Accent; b.TextColor3=Theme.White end
+            TrackAccent(b,"BackgroundColor3")
+            b.MouseButton1Click:Connect(function()
+                if activeB then activeB.BackgroundColor3=Theme.Bg; activeB.TextColor3=Theme.SubText end
+                activeB=b; b.BackgroundColor3=Theme.Accent; b.TextColor3=Theme.White
+                onSelect(item)
+            end)
+        end
+        return holder
+    end
+
+    -- ─── UI SIZE ───
+    SHdr(SettingsPage,"Window")
+    local WC = SCard(SettingsPage,50)
+    SRow(WC,"Window Size")
+    SBtnRow(WC,{"S","M","L","XL"},"M",44,function(s)
+        local map={S=Vector2.new(680,440),M=Vector2.new(860,560),L=Vector2.new(1060,660),XL=Vector2.new(1200,720)}
+        local v=map[s]; Tween(MainFrame,{Size=UDim2.new(0,v.X,0,v.Y)},0.3,Enum.EasingStyle.Quart)
+        Config:Set("__uisize",s)
+    end)
+
+    -- ─── BUTTON SIZE ───
+    local BC = SCard(SettingsPage,50)
+    SRow(BC,"Open Button Size")
+    SBtnRow(BC,{"S","M","L"},"M",44,function(s)
+        local map={S=42,M=52,L=66}
+        Tween(DragBtnFrame,{Size=UDim2.new(0,map[s],0,map[s])},0.25)
+        Config:Set("__btnsize",s)
+    end)
+
+    -- ─── BUTTON SHAPE ───
+    SHdr(SettingsPage,"Button Shape")
+    local SC = SCard(SettingsPage,60)
+    SRow(SC,"Shape","Circle / Square / Diamond / Squircle")
+    local shapeMap = {
+        ["●"] = {corner=UDim.new(1,0),  rot=0},
+        ["■"] = {corner=UDim.new(0,4),  rot=0},
+        ["◆"] = {corner=UDim.new(0,8),  rot=45},
+        ["▣"] = {corner=UDim.new(0,14), rot=0},
+    }
+    local savedShape = Config:Get("__shape","●")
+    SBtnRow(SC,{"●","■","◆","▣"},savedShape,44,function(s)
+        local d = shapeMap[s] or shapeMap["●"]
+        local c = DragBtnShape:FindFirstChildOfClass("UICorner")
+        if c then c.CornerRadius=d.corner end
+        local pc = PulseRing:FindFirstChildOfClass("UICorner")
+        if pc then pc.CornerRadius=d.corner end
+        Tween(DragBtnShape,{Rotation=d.rot},0.3)
+        Tween(DragBtnIcon,{Rotation=-d.rot},0.3)
+        Config:Set("__shape",s)
+    end)
+    -- Apply saved shape on load
+    do
+        local d = shapeMap[savedShape] or shapeMap["●"]
+        local c = DragBtnShape:FindFirstChildOfClass("UICorner")
+        if c then c.CornerRadius=d.corner end
+        DragBtnShape.Rotation = d.rot
+        DragBtnIcon.Rotation  = -d.rot
+    end
+
+    -- ─── COLOR THEME ───
+    SHdr(SettingsPage,"Color Theme")
+    local colorNames = {"Indigo","Pink","Cyan","Green","Orange","Red","Yellow","White"}
+    local savedTheme = Config:Get("__theme","Indigo")
+    local ColorGrid  = New("Frame",{Parent=SettingsPage,Size=UDim2.new(1,0,0,0),BackgroundTransparency=1,AutomaticSize=Enum.AutomaticSize.Y,ZIndex=7},{New("UIGridLayout",{CellSize=UDim2.new(0.23,-4,0,46),CellPadding=UDim2.new(0,4,0,4),SortOrder=Enum.SortOrder.LayoutOrder}),New("UIPadding",{PaddingTop=UDim.new(0,4)})})
+    local activeColorB
+    for _, cn in ipairs(colorNames) do
+        local p  = ColorPresets[cn]
+        local cc = New("TextButton",{Parent=ColorGrid,Text="",BackgroundColor3=Theme.Element,BorderSizePixel=0,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,10)})})
+        New("Frame",{Parent=cc,Size=UDim2.new(0,18,0,18),Position=UDim2.new(0,10,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=p.Accent,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+        New("TextLabel",{Parent=cc,Text=cn,Font=Enum.Font.GothamSemibold,TextSize=12,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-36,1,0),Position=UDim2.new(0,32,0,0),ZIndex=9})
+        local sk = New("UIStroke",{Parent=cc,Color=p.Accent,Thickness=1.5,Transparency= cn==savedTheme and 0 or 1})
+        if cn==savedTheme then activeColorB=cc end
+        cc.MouseButton1Click:Connect(function()
+            if activeColorB then
+                local as=activeColorB:FindFirstChildOfClass("UIStroke")
+                if as then Tween(as,{Transparency=1},0.2) end
+            end
+            activeColorB=cc; sk.Transparency=0
+            ApplyColorTheme(cn)
+            Config:Set("__theme",cn)
+            Notify("🎨 Theme","Applied: "..cn,2)
+        end)
+        cc.MouseEnter:Connect(function() Tween(cc,{BackgroundColor3=Theme.ElementHov},0.15) end)
+        cc.MouseLeave:Connect(function() Tween(cc,{BackgroundColor3=Theme.Element},0.15) end)
+    end
+    -- Apply saved theme on load
+    if savedTheme ~= "Indigo" then ApplyColorTheme(savedTheme) end
+
+    -- ─── ANTI-AFK ───
+    SHdr(SettingsPage,"Player")
+    local AC = SCard(SettingsPage,60)
+    SRow(AC,"Anti-AFK","Prevent automatic kick from server")
+    local afkState = Config:Get("__antiafk",false)
+    local afkConn
+    local afkTr = New("Frame",{Parent=AC,Size=UDim2.new(0,42,0,22),Position=UDim2.new(1,-56,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=afkState and Theme.ToggleOn or Theme.ToggleOff,BorderSizePixel=0,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+    TrackAccent(afkTr,"BackgroundColor3")
+    local afkTh = New("Frame",{Parent=afkTr,Size=UDim2.new(0,16,0,16),Position=afkState and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=Theme.White,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+    local afkSt = New("TextLabel",{Parent=AC,Text=afkState and "ON ✓" or "OFF",Font=Enum.Font.GothamMono,TextSize=10,TextColor3=afkState and Theme.Success or Theme.SubText,BackgroundTransparency=1,Size=UDim2.new(0,40,0,16),Position=UDim2.new(1,-100,0,32),ZIndex=8,TextXAlignment=Enum.TextXAlignment.Right})
+
+    local function SetAFK(v)
+        afkState = v
+        Tween(afkTr,{BackgroundColor3=v and Theme.ToggleOn or Theme.ToggleOff},0.2)
+        Tween(afkTh,{Position=v and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0)},0.2)
+        afkSt.Text       = v and "ON ✓" or "OFF"
+        afkSt.TextColor3 = v and Theme.Success or Theme.SubText
+        Config:Set("__antiafk",v)
+        if v then
+            afkConn = RunService.Heartbeat:Connect(function()
+                pcall(function() VirtualUser:CaptureController(); VirtualUser:ClickButton2(Vector2.new()) end)
+            end)
+        else
+            if afkConn then afkConn:Disconnect(); afkConn=nil end
+        end
+    end
+    New("TextButton",{Parent=AC,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=10}).MouseButton1Click:Connect(function() SetAFK(not afkState) end)
+    if afkState then SetAFK(true) end -- restore saved state
+
+    -- ─── CONFIG SAVE CONTROLS ───
+    SHdr(SettingsPage,"Config")
+
+    -- Config file name display
+    local CfgCard = SCard(SettingsPage,50)
+    SRow(CfgCard,"Config File")
+    New("TextLabel",{Parent=CfgCard,Text=cfgFile,Font=Enum.Font.GothamMono,TextSize=11,TextColor3=Theme.Accent,TextXAlignment=Enum.TextXAlignment.Right,BackgroundTransparency=1,Size=UDim2.new(0.4,0,1,0),Position=UDim2.new(0.58,0,0,0),ZIndex=8})
+    TrackAccent(CfgCard:FindFirstChild("TextLabel",true),"TextColor3")
+
+    -- Auto-save toggle
+    local SaveCard = SCard(SettingsPage,50)
+    SRow(SaveCard,"Auto Save Config")
+    local saveOn = cfgEnabled
+    local saveTr = New("Frame",{Parent=SaveCard,Size=UDim2.new(0,42,0,22),Position=UDim2.new(1,-56,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=saveOn and Theme.ToggleOn or Theme.ToggleOff,BorderSizePixel=0,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+    TrackAccent(saveTr,"BackgroundColor3")
+    local saveTh = New("Frame",{Parent=saveTr,Size=UDim2.new(0,16,0,16),Position=saveOn and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=Theme.White,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+    New("TextButton",{Parent=SaveCard,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,Text="",ZIndex=10}).MouseButton1Click:Connect(function()
+        saveOn = not saveOn
+        Config._enabled = saveOn
+        Tween(saveTr,{BackgroundColor3=saveOn and Theme.ToggleOn or Theme.ToggleOff},0.2)
+        Tween(saveTh,{Position=saveOn and UDim2.new(1,-19,0.5,0) or UDim2.new(0,3,0.5,0)},0.2)
+        Notify(saveOn and "✓ Config Save ON" or "Config Save OFF","",1)
+    end)
+
+    -- Save Now + Reset buttons
+    local BtnCard2 = SCard(SettingsPage,50)
+    New("TextLabel",{Parent=BtnCard2,Text="Manual Control",Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.Text,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(0.5,0,1,0),Position=UDim2.new(0,14,0,0),ZIndex=8})
+    local BtnHolder = New("Frame",{Parent=BtnCard2,Size=UDim2.new(0,168,0,30),Position=UDim2.new(1,-178,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,ZIndex=8},{New("UIListLayout",{Padding=UDim.new(0,6),FillDirection=Enum.FillDirection.Horizontal,VerticalAlignment=Enum.VerticalAlignment.Center})})
+
+    local SaveNowBtn = New("TextButton",{Parent=BtnHolder,Text="SAVE NOW",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Theme.White,BackgroundColor3=Theme.Accent,BorderSizePixel=0,Size=UDim2.new(0,80,1,0),ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(0,7)})})
+    TrackAccent(SaveNowBtn,"BackgroundColor3")
+    SaveNowBtn.MouseButton1Click:Connect(function()
+        Config:Save()
+        Tween(SaveNowBtn,{BackgroundColor3=Theme.Success},0.15)
+        task.delay(0.8,function() Tween(SaveNowBtn,{BackgroundColor3=Theme.Accent},0.3) end)
+        Notify("✓ Saved","Config disimpan ke "..cfgFile,2)
+    end)
+
+    local ResetBtn = New("TextButton",{Parent=BtnHolder,Text="RESET",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Theme.White,BackgroundColor3=Color3.fromRGB(80,25,25),BorderSizePixel=0,Size=UDim2.new(0,68,1,0),ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(0,7)})})
+    ResetBtn.MouseButton1Click:Connect(function()
+        Config:Reset()
+        Tween(ResetBtn,{BackgroundColor3=Theme.Danger},0.15)
+        task.delay(0.8,function() Tween(ResetBtn,{BackgroundColor3=Color3.fromRGB(80,25,25)},0.3) end)
+        Notify("Config Reset","Semua settings dikembalikan ke default.",3)
+    end)
+
+    -- ─── ICON ID ───
+    SHdr(SettingsPage,"Icon")
+    local ICard = SCard(SettingsPage,76)
+    SRow(ICard,"Button Icon ID","Masukkan Roblox Asset ID")
+    local IInput = New("TextBox",{Parent=ICard,Text="",PlaceholderText="rbxassetid://123456789",Font=Enum.Font.GothamMono,TextSize=12,TextColor3=Theme.Text,PlaceholderColor3=Theme.SubText,BackgroundColor3=Theme.Bg,BorderSizePixel=0,Size=UDim2.new(0.68,0,0,26),Position=UDim2.new(0,14,0,44),ClearTextOnFocus=false,ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,6)}),New("UIPadding",{PaddingLeft=UDim.new(0,8)}),New("UIStroke",{Color=Theme.Border,Thickness=1,Transparency=0.4})})
+    local IApply = New("TextButton",{Parent=ICard,Text="APPLY",Font=Enum.Font.GothamBold,TextSize=10,TextColor3=Theme.White,BackgroundColor3=Theme.Accent,BorderSizePixel=0,Size=UDim2.new(0.24,0,0,26),Position=UDim2.new(0.74,0,0,44),ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,6)})})
+    TrackAccent(IApply,"BackgroundColor3")
+    IApply.MouseButton1Click:Connect(function()
+        SetIcon(DragBtnIcon,IInput.Text); SetIcon(WinIcon,IInput.Text)
+        Config:Set("__icon",IInput.Text)
+        Notify("✓ Icon Updated","Button icon ditukar!",2)
+    end)
+    -- Restore saved icon
+    local savedIcon = Config:Get("__icon","")
+    if savedIcon ~= "" then
+        IInput.Text = savedIcon
+        SetIcon(DragBtnIcon,savedIcon); SetIcon(WinIcon,savedIcon)
+    end
+
+    -- ════════════════════════════
+    --    SETTINGS SIDEBAR BTN
+    -- ════════════════════════════
+    local SettingsBtn = New("TextButton",{Parent=SidebarBottom,Size=UDim2.new(1,-12,0,38),Position=UDim2.new(0,6,0,7),BackgroundColor3=Theme.Element,BackgroundTransparency=1,BorderSizePixel=0,Text="",ZIndex=8},{New("UICorner",{CornerRadius=UDim.new(0,9)})})
+    New("TextLabel",{Parent=SettingsBtn,Text="⚙  Settings",Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-10,1,0),Position=UDim2.new(0,10,0,0),ZIndex=9})
+
+    -- ════════════════════════════
+    --    WINDOW OBJECT
+    -- ════════════════════════════
+    local Window   = {}
+    Window._Tabs   = {}
+    Window._Config = Config
+
+    function Window:CreateTab(tabName, tabIcon)
+        tabName = tabName or "Tab"
+        local Tab        = {}
+        Tab._Name        = tabName
+        Tab._SubTabs     = {}
+        Tab._Expanded    = false
+
+        local TabCon = New("Frame",{Parent=Sidebar,Size=UDim2.new(1,0,0,34),BackgroundTransparency=1,AutomaticSize=Enum.AutomaticSize.Y,LayoutOrder=#Window._Tabs+1},{New("UIListLayout",{Padding=UDim.new(0,0),SortOrder=Enum.SortOrder.LayoutOrder})})
+        local TabBtn = New("TextButton",{Parent=TabCon,Size=UDim2.new(1,0,0,34),BackgroundColor3=Theme.Element,BackgroundTransparency=1,BorderSizePixel=0,Text="",ZIndex=7,LayoutOrder=0},{New("UICorner",{CornerRadius=UDim.new(0,9)})})
+        local TabIcon= New("ImageLabel",{Parent=TabBtn,Size=UDim2.new(0,20,0,20),Position=UDim2.new(0,8,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,Image="rbxassetid://7059346373",ImageColor3=Theme.SubText,ZIndex=8})
+        SetIcon(TabIcon,tabIcon)
+        local TabLbl = New("TextLabel",{Parent=TabBtn,Text=tabName,Font=Enum.Font.GothamSemibold,TextSize=13,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-60,1,0),Position=UDim2.new(0,34,0,0),ZIndex=8})
+        local ArrLbl = New("TextLabel",{Parent=TabBtn,Text="▶",Font=Enum.Font.GothamBold,TextSize=9,TextColor3=Theme.SubText,BackgroundTransparency=1,Size=UDim2.new(0,20,1,0),Position=UDim2.new(1,-22,0,0),ZIndex=8})
+        local SubList= New("Frame",{Parent=TabCon,Size=UDim2.new(1,0,0,0),BackgroundTransparency=1,ClipsDescendants=true,LayoutOrder=1},{New("UIListLayout",{Padding=UDim.new(0,1),SortOrder=Enum.SortOrder.LayoutOrder})})
+
+        local Page = New("ScrollingFrame",{Parent=PageContainer,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false,ZIndex=6},{New("UIListLayout",{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder}),New("UIPadding",{PaddingTop=UDim.new(0,16),PaddingLeft=UDim.new(0,16),PaddingRight=UDim.new(0,16),PaddingBottom=UDim.new(0,16)})})
+        TrackAccent(Page,"ScrollBarImageColor3")
+
+        Tab._Page=Page; Tab._SubList=SubList; Tab._Btn=TabBtn; Tab._Lbl=TabLbl; Tab._Icn=TabIcon
+
+        local function SelTab()
+            for _,t in pairs(Window._Tabs) do
+                if t._Page then t._Page.Visible=false end
+                Tween(t._Btn,{BackgroundTransparency=1},0.18)
+                if t._Lbl then Tween(t._Lbl,{TextColor3=Theme.SubText},0.18) end
+                if t._Icn then Tween(t._Icn,{ImageColor3=Theme.SubText},0.18) end
+            end
+            SettingsPage.Visible=false
+            Tween(SettingsBtn,{BackgroundTransparency=1},0.18)
+            Page.Visible=true
+            Tween(TabBtn,{BackgroundTransparency=0},0.18)
+            Tween(TabLbl,{TextColor3=Theme.Text},0.18)
+            Tween(TabIcon,{ImageColor3=Theme.Accent},0.18)
+            TrackAccent(TabIcon,"ImageColor3")
+            Window._ActiveTab=Tab
+        end
+
+        TabBtn.MouseButton1Click:Connect(function()
+            Tab._Expanded=not Tab._Expanded
+            Tween(ArrLbl,{Rotation=Tab._Expanded and 90 or 0},0.2)
+            Tween(SubList,{Size=UDim2.new(1,0,0,Tab._Expanded and #Tab._SubTabs*29 or 0)},0.25)
+            SelTab()
+        end)
+        TabBtn.MouseEnter:Connect(function() if Window._ActiveTab~=Tab then Tween(TabBtn,{BackgroundTransparency=0.6},0.18) end end)
+        TabBtn.MouseLeave:Connect(function() if Window._ActiveTab~=Tab then Tween(TabBtn,{BackgroundTransparency=1},0.18) end end)
+        table.insert(Window._Tabs,Tab)
+        if #Window._Tabs==1 then SelTab(); Tab._Expanded=true; ArrLbl.Rotation=90 end
+
+        -- ── Element creators (all auto-save via Config) ──
+        function Tab:CreateToggle(cfg)   return MakeToggle(Page,cfg)   end
+        function Tab:CreateSlider(cfg)   return MakeSlider(Page,cfg)   end
+        function Tab:CreateButton(cfg)   return MakeButton(Page,cfg)   end
+        function Tab:CreateDropdown(cfg) return MakeDropdown(Page,cfg) end
+        function Tab:CreateInput(cfg)    return MakeInput(Page,cfg)    end
+        function Tab:CreateSection(n)    return MakeSection(Page,n)    end
+        function Tab:CreateLabel(t)      return MakeLabel(Page,t)      end
+        function Tab:SetIcon(id)         SetIcon(TabIcon,id)           end
+
+        -- ── CreateSubTab ──
+        function Tab:CreateSubTab(sName, sIcon)
+            local ST = {}
+            local SPage = New("ScrollingFrame",{Parent=PageContainer,Size=UDim2.new(1,0,1,0),BackgroundTransparency=1,BorderSizePixel=0,ScrollBarThickness=3,ScrollBarImageColor3=Theme.Accent,CanvasSize=UDim2.new(0,0,0,0),AutomaticCanvasSize=Enum.AutomaticSize.Y,Visible=false,ZIndex=6},{New("UIListLayout",{Padding=UDim.new(0,8),SortOrder=Enum.SortOrder.LayoutOrder}),New("UIPadding",{PaddingTop=UDim.new(0,16),PaddingLeft=UDim.new(0,16),PaddingRight=UDim.new(0,16),PaddingBottom=UDim.new(0,16)})})
+            TrackAccent(SPage,"ScrollBarImageColor3")
+            local SBtn = New("TextButton",{Parent=SubList,Size=UDim2.new(1,0,0,28),BackgroundColor3=Theme.Element,BackgroundTransparency=1,BorderSizePixel=0,Text="",ZIndex=8,LayoutOrder=#Tab._SubTabs+1},{New("UICorner",{CornerRadius=UDim.new(0,8)})})
+            local SDot = New("Frame",{Parent=SBtn,Size=UDim2.new(0,5,0,5),Position=UDim2.new(0,18,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundColor3=Theme.SubText,BorderSizePixel=0,ZIndex=9},{New("UICorner",{CornerRadius=UDim.new(1,0)})})
+            if sIcon and sIcon~="" then local si=New("ImageLabel",{Parent=SBtn,Size=UDim2.new(0,14,0,14),Position=UDim2.new(0,28,0.5,0),AnchorPoint=Vector2.new(0,0.5),BackgroundTransparency=1,ZIndex=9}); SetIcon(si,sIcon) end
+            local SLbl = New("TextLabel",{Parent=SBtn,Text=sName or "Sub",Font=Enum.Font.Gotham,TextSize=12,TextColor3=Theme.SubText,TextXAlignment=Enum.TextXAlignment.Left,BackgroundTransparency=1,Size=UDim2.new(1,-48,1,0),Position=UDim2.new(0,(sIcon and sIcon~="") and 48 or 30,0,0),ZIndex=9})
+
+            local function SelSub()
+                for _,t2 in pairs(Window._Tabs) do
+                    if t2._Page then t2._Page.Visible=false end
+                    for _,s2 in pairs(t2._SubTabs) do
+                        if s2._Page then s2._Page.Visible=false end
+                        if s2._Lbl then Tween(s2._Lbl,{TextColor3=Theme.SubText},0.15) end
+                        if s2._Dot then Tween(s2._Dot,{BackgroundColor3=Theme.SubText},0.15) end
+                        Tween(s2._Btn,{BackgroundTransparency=1},0.15)
+                    end
+                end
+                SettingsPage.Visible=false
+                SPage.Visible=true
+                Tween(SLbl,{TextColor3=Theme.Accent},0.15)
+                Tween(SDot,{BackgroundColor3=Theme.Accent},0.15)
+                TrackAccent(SDot,"BackgroundColor3")
+                Tween(SBtn,{BackgroundTransparency=0.7},0.15)
+            end
+            SBtn.MouseButton1Click:Connect(SelSub)
+            SBtn.MouseEnter:Connect(function() Tween(SBtn,{BackgroundTransparency=0.8},0.12); Tween(SLbl,{TextColor3=Theme.Text},0.12) end)
+            SBtn.MouseLeave:Connect(function() Tween(SBtn,{BackgroundTransparency=1},0.12); if not SPage.Visible then Tween(SLbl,{TextColor3=Theme.SubText},0.12) end end)
+
+            ST._Page=SPage; ST._Lbl=SLbl; ST._Dot=SDot; ST._Btn=SBtn
+            table.insert(Tab._SubTabs,ST)
+            if Tab._Expanded then Tween(SubList,{Size=UDim2.new(1,0,0,#Tab._SubTabs*29)},0.2) end
+
+            function ST:CreateToggle(cfg)   return MakeToggle(SPage,cfg)   end
+            function ST:CreateSlider(cfg)   return MakeSlider(SPage,cfg)   end
+            function ST:CreateButton(cfg)   return MakeButton(SPage,cfg)   end
+            function ST:CreateDropdown(cfg) return MakeDropdown(SPage,cfg) end
+            function ST:CreateInput(cfg)    return MakeInput(SPage,cfg)    end
+            function ST:CreateSection(n)    return MakeSection(SPage,n)    end
+            function ST:CreateLabel(t)      return MakeLabel(SPage,t)      end
+            return ST
+        end
+
+        return Tab
+    end
+
+    -- Settings btn wiring
+    SettingsBtn.MouseButton1Click:Connect(function()
+        for _,t in pairs(Window._Tabs) do
+            if t._Page then t._Page.Visible=false end
+            Tween(t._Btn,{BackgroundTransparency=1},0.18)
+            if t._Lbl then Tween(t._Lbl,{TextColor3=Theme.SubText},0.18) end
+            if t._Icn then Tween(t._Icn,{ImageColor3=Theme.SubText},0.18) end
+        end
+        SettingsPage.Visible=true
+        Tween(SettingsBtn,{BackgroundTransparency=0},0.18)
+    end)
+    SettingsBtn.MouseEnter:Connect(function() Tween(SettingsBtn,{BackgroundTransparency=0.6},0.15) end)
+    SettingsBtn.MouseLeave:Connect(function() if not SettingsPage.Visible then Tween(SettingsBtn,{BackgroundTransparency=1},0.15) end end)
+
+    function Window:Notify(t,d,dur) Notify(t,d,dur) end
+    function Window:SetIcon(id) SetIcon(DragBtnIcon,id); SetIcon(WinIcon,id) end
+    function Window:SaveConfig() Config:Save() end
+    function Window:ResetConfig() Config:Reset() end
+    function Window:Destroy() ScreenGui:Destroy() end
+
+    return Window
+end
+
+return NexUI

@@ -6,7 +6,7 @@
 -- Destroy previous instance if re-executing
 if _G.MelayuHubDestroy then pcall(_G.MelayuHubDestroy) end
 
-local Nexus = loadstring(game:HttpGet("https://raw.githubusercontent.com/trttttttt/Something/refs/heads/main/Some2"))()
+local Nexus = loadstring(game:HttpGet("https://raw.githubusercontent.com/trttttttt/Something/refs/heads/main/Some3"))()
 
 local Win = Nexus:CreateWindow({
     Title        = "MELAYU-HUB",

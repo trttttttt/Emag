@@ -2354,7 +2354,7 @@ TabBoss:CreateToggle({Name="Auto Farm Boss", CurrentValue=false,
 end
 
 local Tab5 = Win:CreateTab(" Quest", "zap")
-Tab5:CreateLabel("⚠️ IF IT DOES NOT COLLECT THE HERB, SELECT IT MANUALLY IN HERB TAB FIRST 🤣😂")
+Tab5:CreateLabel("⚠️ IF IT DOES NOT COLLECT THE HERB, SELECT IT MANUALLY IN HERB TAB FIRST IDK HOW TO FIX IT 🤣😂")
 
 -- selectedSlayingQuest/selectedHarvestingQuest declared at top
 

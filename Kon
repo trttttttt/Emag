@@ -1,4 +1,4 @@
-local NexUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/trttttttt/Something/refs/heads/main/Some2"))()
+local NexUI = loadstring(game:HttpGet("https://raw.githubusercontent.com/trttttttt/Something/refs/heads/main/Some3"))()
 
 local Window = NexUI:CreateWindow({
     Title      = "Roll Script",

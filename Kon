@@ -1,0 +1,333 @@
+-- CleaningScrub Auto Script (Rayfield UI + Anti-AFK)
+-- Loop dari 1 sampai 20, lepas 20 ulang balik dari 1
+
+local Rayfield = loadstring(game:HttpGet('https://sirius.menu/rayfield'))()
+
+local Window = Rayfield:CreateWindow({
+    Name = "CleaningScrub Auto",
+    LoadingTitle = "CleaningScrub Auto",
+    LoadingSubtitle = "by Lol",
+    ConfigurationSaving = {
+        Enabled = false
+    },
+    Discord = {
+        Enabled = false
+    },
+    KeySystem = false
+})
+
+local MainTab = Window:CreateTab("Main", 4483362458)
+
+local Remotes = game:GetService("ReplicatedStorage"):WaitForChild("Remotes")
+local LocalPlayer = game:GetService("Players").LocalPlayer
+
+local autoRunning = false
+local delayTime = 0 -- 0 = task.wait minimum (satu frame)
+local burstCount = 10 -- berapa kali fire sebelum wait sekali (ni yang buat lagi laju)
+
+MainTab:CreateToggle({
+    Name = "Auto Fire (Loop 1-20)",
+    CurrentValue = false,
+    Flag = "AutoFireToggle",
+    Callback = function(Value)
+        autoRunning = Value
+        if Value then
+            task.spawn(function()
+                local n = 1
+                while autoRunning do
+                    for i = 1, burstCount do
+                        local args = { [1] = n }
+                        Remotes.CleaningScrub:FireServer(unpack(args))
+
+                        n += 1
+                        if n > 20 then
+                            n = 1
+                        end
+                    end
+
+                    task.wait(delayTime)
+                end
+            end)
+        end
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Fire Delay",
+    Range = { 0, 1 },
+    Increment = 0.01,
+    Suffix = "s",
+    CurrentValue = 0,
+    Flag = "FireDelay",
+    Callback = function(Value)
+        delayTime = Value
+    end,
+})
+
+MainTab:CreateSlider({
+    Name = "Fires Per Tick (Burst)",
+    Range = { 1, 30 },
+    Increment = 1,
+    Suffix = "x",
+    CurrentValue = 10,
+    Flag = "BurstCount",
+    Callback = function(Value)
+        burstCount = Value
+    end,
+})
+
+local spinRunning = false
+
+MainTab:CreateToggle({
+    Name = "Auto Spin",
+    CurrentValue = false,
+    Flag = "AutoSpinToggle",
+    Callback = function(Value)
+        spinRunning = Value
+        if Value then
+            task.spawn(function()
+                while spinRunning do
+                    Remotes.RequestSpin:FireServer()
+                    task.wait(1)
+                end
+            end)
+        end
+    end,
+})
+
+--========================================
+-- TAB 2: AUTO BUY POTION
+--========================================
+local PotionTab = Window:CreateTab("Auto Buy Potion", 6031280882)
+
+local potionList = {
+    "Mutation1", "Mutation2", "Mutation3",
+    "Luck1", "Luck2", "Luck3",
+    "Cash1", "Cash2", "Cash3",
+    "Scrub1", "Scrub2", "Scrub3",
+}
+
+local selectedPotions = {}
+local buyRunning = false
+local buyDelay = 0.5
+
+PotionTab:CreateDropdown({
+    Name = "Pilih Potion",
+    Options = potionList,
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "PotionDropdown",
+    Callback = function(Options)
+        selectedPotions = Options
+    end,
+})
+
+PotionTab:CreateToggle({
+    Name = "Auto Buy Potion",
+    CurrentValue = false,
+    Flag = "AutoBuyToggle",
+    Callback = function(Value)
+        buyRunning = Value
+        if Value then
+            task.spawn(function()
+                while buyRunning do
+                    if #selectedPotions == 0 then
+                        task.wait(1)
+                    else
+                        for _, potion in ipairs(selectedPotions) do
+                            if not buyRunning then break end
+                            Remotes.RequestBuyPotion:FireServer(potion)
+                            task.wait(buyDelay)
+                        end
+                    end
+                end
+            end)
+        end
+    end,
+})
+
+PotionTab:CreateSlider({
+    Name = "Buy Delay",
+    Range = { 0.1, 3 },
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 0.5,
+    Flag = "BuyDelay",
+    Callback = function(Value)
+        buyDelay = Value
+    end,
+})
+
+--========================================
+-- TAB 3: BOSS AUTO JOIN
+--========================================
+local BossTab = Window:CreateTab("Boss Auto Join", 9780469424)
+
+local bossRunning = false
+local bossDelay = 1
+
+BossTab:CreateToggle({
+    Name = "Auto Join Boss",
+    CurrentValue = false,
+    Flag = "AutoBossToggle",
+    Callback = function(Value)
+        bossRunning = Value
+        if Value then
+            task.spawn(function()
+                while bossRunning do
+                    Remotes.RequestEnterBossBattle:FireServer()
+                    task.wait(bossDelay)
+                end
+            end)
+        end
+    end,
+})
+
+BossTab:CreateSlider({
+    Name = "Join Delay",
+    Range = { 0.5, 5 },
+    Increment = 0.5,
+    Suffix = "s",
+    CurrentValue = 1,
+    Flag = "BossDelay",
+    Callback = function(Value)
+        bossDelay = Value
+    end,
+})
+
+--========================================
+-- TAB 4: AUTO REROLL TRAIT
+--========================================
+local TraitTab = Window:CreateTab("Auto Reroll Trait", 7733960981)
+
+local traitTargets = {
+    "Common", "Epic", "Legendary", "Mythic", "Secret",
+    "Fighter", "Money Maker", "Rich", "Money Master", "Golden Worker",
+    "Boss Slayer", "Ultimate", "Speed Cleaner", "Perfect", "Strong", "Hard Worker",
+}
+
+local traitNumbers = { "1", "2", "3", "4", "5" }
+
+local selectedTraitTargets = {}
+local selectedTraitNumber = nil
+local traitRerollRunning = false
+local traitRerollDelay = 0.3
+
+TraitTab:CreateDropdown({
+    Name = "Target Rarity / Trait (Rujukan)",
+    Options = traitTargets,
+    CurrentOption = {},
+    MultipleOptions = true,
+    Flag = "TraitDropdown",
+    Callback = function(Options)
+        selectedTraitTargets = Options
+    end,
+})
+
+TraitTab:CreateParagraph({
+    Title = "Nota",
+    Content = "Dropdown 'Target Rarity/Trait' di atas rujukan je (senarai dari TraitConfig). Remote reroll cuma terima nombor slot — pilih nombor kat bawah untuk tentukan slot mana nak di-reroll.",
+})
+
+TraitTab:CreateDropdown({
+    Name = "Pilih Nombor",
+    Options = traitNumbers,
+    CurrentOption = {},
+    MultipleOptions = false,
+    Flag = "TraitNumberDropdown",
+    Callback = function(Option)
+        if type(Option) == "table" then
+            selectedTraitNumber = tonumber(Option[1])
+        else
+            selectedTraitNumber = tonumber(Option)
+        end
+    end,
+})
+
+local AutoRerollToggle
+
+AutoRerollToggle = TraitTab:CreateToggle({
+    Name = "Auto Reroll Trait",
+    CurrentValue = false,
+    Flag = "AutoRerollToggle",
+    Callback = function(Value)
+        if Value and not selectedTraitNumber then
+            Rayfield:Notify({
+                Title = "Pilih Nombor Dulu",
+                Content = "Sila pilih nombor (1-5) sebelum start Auto Reroll.",
+                Duration = 4,
+            })
+            traitRerollRunning = false
+            if AutoRerollToggle and AutoRerollToggle.Set then
+                AutoRerollToggle:Set(false)
+            end
+            return
+        end
+
+        traitRerollRunning = Value
+        if traitRerollRunning then
+            task.spawn(function()
+                while traitRerollRunning do
+                    Remotes.RequestTraitReroll:FireServer(selectedTraitNumber)
+                    task.wait(traitRerollDelay)
+                end
+            end)
+        end
+    end,
+})
+
+TraitTab:CreateSlider({
+    Name = "Reroll Delay",
+    Range = { 0.1, 2 },
+    Increment = 0.1,
+    Suffix = "s",
+    CurrentValue = 0.3,
+    Flag = "TraitRerollDelay",
+    Callback = function(Value)
+        traitRerollDelay = Value
+    end,
+})
+
+--========================================
+-- TAB 5: SETTING (Anti-AFK)
+--========================================
+local SettingTab = Window:CreateTab("Setting", 4400511784)
+
+local VirtualUser = game:GetService("VirtualUser")
+local afkConnection = nil
+
+local function enableAntiAFK()
+    if afkConnection then return end
+    afkConnection = LocalPlayer.Idled:Connect(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new())
+    end)
+end
+
+local function disableAntiAFK()
+    if afkConnection then
+        afkConnection:Disconnect()
+        afkConnection = nil
+    end
+end
+
+SettingTab:CreateToggle({
+    Name = "Anti AFK",
+    CurrentValue = true,
+    Flag = "AntiAFKToggle",
+    Callback = function(Value)
+        if Value then
+            enableAntiAFK()
+        else
+            disableAntiAFK()
+        end
+    end,
+})
+
+enableAntiAFK() -- default ON
+
+Rayfield:Notify({
+    Title = "Script Loaded",
+    Content = "Semua tab dah siap: Main, Auto Buy Potion, Boss Auto Join, Auto Reroll Trait, Setting.",
+    Duration = 5,
+})

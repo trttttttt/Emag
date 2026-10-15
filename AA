@@ -1,0 +1,1196 @@
+--[[
+	UNIT HUNTER  |  Rayfield
+	Tab 1 : Auto Buy Rolled Unit (rarity + plot + roll station terdekat -> teleport + ProximityPrompt)
+	Tab 2 : Misc (Auto Spin Wheel, Auto Buy Ruby Shop, QoL)
+	Tekan K untuk sorok / tunjuk UI.
+]]
+
+local env = (getgenv and getgenv()) or _G
+
+if env.__UnitHunterLoaded then
+	warn("[UnitHunter] Script dah berjalan. Tekan Unload kat UI dulu kalau nak run semula.")
+	return
+end
+env.__UnitHunterLoaded = true
+
+local function release()
+	env.__UnitHunterLoaded = nil
+end
+
+local function main()
+	if not game:IsLoaded() then
+		game.Loaded:Wait()
+	end
+
+	local Players = game:GetService("Players")
+	local ReplicatedStorage = game:GetService("ReplicatedStorage")
+	local VirtualUser = game:GetService("VirtualUser")
+
+	local player = Players.LocalPlayer
+	while not player do
+		task.wait()
+		player = Players.LocalPlayer
+	end
+
+	-- =====================================================
+	-- Muat Rayfield
+	-- =====================================================
+	local okR, Rayfield = pcall(function()
+		return loadstring(game:HttpGet("https://sirius.menu/rayfield"))()
+	end)
+	if not okR or type(Rayfield) ~= "table" then
+		warn("[UnitHunter] Gagal muat Rayfield: " .. tostring(Rayfield))
+		release()
+		return
+	end
+
+	local function notify(title, content, duration)
+		pcall(function()
+			Rayfield:Notify({ Title = title, Content = content, Duration = duration or 5 })
+		end)
+	end
+
+	-- =====================================================
+	-- Remote
+	-- =====================================================
+	local Signal
+	do
+		local folder = ReplicatedStorage:WaitForChild("ReplicaRemoteEvents", 15)
+		if folder then
+			Signal = folder:WaitForChild("Replica_ReplicaSignal", 15)
+		end
+	end
+	if not Signal then
+		warn("[UnitHunter] Remote Replica_ReplicaSignal tak jumpa.")
+		notify("Error", "Remote Replica_ReplicaSignal tak jumpa.", 8)
+		release()
+		return
+	end
+
+	-- Replica ID (arg pertama). Nilai ni boleh bertukar ikut server,
+	-- jadi script auto-tangkap bila kau buat action tu sekali secara manual.
+	local ids = env.__UnitHunterIds
+	if type(ids) ~= "table" then
+		ids = {
+			RequestWheelSpin = 15,
+			RequestRubyShopBuy = 15,
+			RequestStartAutoRoll = 34,
+		}
+		env.__UnitHunterIds = ids
+	end
+	if ids.RequestStartAutoRoll == nil then
+		ids.RequestStartAutoRoll = 34
+	end
+
+	env.__UnitHunterOnCapture = function(action, id)
+		notify("Replica ID dikesan", tostring(action) .. " = " .. tostring(id), 4)
+	end
+
+	if not env.__UnitHunterHooked then
+		local okHook = pcall(function()
+			assert(hookmetamethod and getnamecallmethod, "executor tak support hookmetamethod")
+			local wrap = newcclosure or function(f)
+				return f
+			end
+			local isOwnCall = checkcaller or function()
+				return false
+			end
+			local old
+			old = hookmetamethod(game, "__namecall", wrap(function(self, ...)
+				if getnamecallmethod() == "FireServer" and self == Signal and not isOwnCall() then
+					local a, b = ...
+					if type(a) == "number" and type(b) == "string" and ids[b] ~= nil and ids[b] ~= a then
+						ids[b] = a
+						local cb = env.__UnitHunterOnCapture
+						if cb then
+							task.defer(cb, b, a)
+						end
+					end
+				end
+				return old(self, ...)
+			end))
+		end)
+		env.__UnitHunterHooked = okHook
+	end
+
+	local function fire(action, payload)
+		local id = ids[action]
+		local ok, err = pcall(function()
+			if payload ~= nil then
+				Signal:FireServer(id, action, payload)
+			else
+				Signal:FireServer(id, action)
+			end
+		end)
+		if not ok then
+			warn("[UnitHunter] Fire gagal (" .. tostring(action) .. "): " .. tostring(err))
+		end
+		return ok
+	end
+
+	-- =====================================================
+	-- Config (UnitConfig + RubyShopConfig)
+	-- =====================================================
+	local function safeRequire(...)
+		local path = { ... }
+		local ok, res = pcall(function()
+			local node = ReplicatedStorage
+			for _, name in ipairs(path) do
+				node = node:WaitForChild(name, 10)
+				if not node then
+					return nil
+				end
+			end
+			return require(node)
+		end)
+		if ok and type(res) == "table" then
+			return res
+		end
+		return nil
+	end
+
+	local UnitConfig = safeRequire("Shared", "UnitConfig")
+	local RubyConfig = safeRequire("Shared", "RubyShopConfig")
+	if not UnitConfig then
+		UnitConfig = {}
+		notify("Amaran", "UnitConfig tak dapat dimuat. Auto buy tak akan jumpa unit.", 8)
+	end
+
+	local SUFFIX = { "", "K", "M", "B", "T", "Qa" }
+	local function fmt(n)
+		if type(n) ~= "number" then
+			return "?"
+		end
+		local i, v = 1, n
+		while math.abs(v) >= 1000 and i < #SUFFIX do
+			v = v / 1000
+			i = i + 1
+		end
+		if i == 1 then
+			return tostring(v)
+		end
+		return string.format("%.1f%s", v, SUFFIX[i])
+	end
+
+	-- Nama (key / DisplayName) -> { Key, Rarity }. Rarity sahaja yang kita ambil.
+	local unitByName = {}
+	local raritySeen = {}
+	for key, data in pairs(UnitConfig) do
+		if type(data) == "table" and type(data.Rarity) == "string" then
+			raritySeen[data.Rarity] = true
+			if type(data.DisplayName) == "string" and data.DisplayName ~= "" then
+				unitByName[data.DisplayName] = { Key = key, Rarity = data.Rarity }
+			end
+		end
+	end
+	for key, data in pairs(UnitConfig) do
+		if type(data) == "table" and type(data.Rarity) == "string" then
+			unitByName[key] = { Key = key, Rarity = data.Rarity } -- key menang atas DisplayName
+		end
+	end
+
+	local RARITY_ORDER = {
+		"Common", "Uncommon", "Rare", "Epic", "Legendary",
+		"Mythic", "Divine", "Cosmic", "Secret", "Limited",
+	}
+	local rarityOptions = {}
+	local added = {}
+	for _, r in ipairs(RARITY_ORDER) do
+		if raritySeen[r] or next(raritySeen) == nil then
+			table.insert(rarityOptions, r)
+			added[r] = true
+		end
+	end
+	local extra = {}
+	for r in pairs(raritySeen) do
+		if not added[r] then
+			table.insert(extra, r)
+		end
+	end
+	table.sort(extra)
+	for _, r in ipairs(extra) do
+		table.insert(rarityOptions, r)
+	end
+
+	-- Senarai unit untuk dropdown nama (disusun ikut rarity, kemudian nama)
+	local rarityRank = {}
+	for i, r in ipairs(RARITY_ORDER) do
+		rarityRank[r] = i
+	end
+	local unitList = {}
+	for key, data in pairs(UnitConfig) do
+		if type(data) == "table" and type(data.Rarity) == "string" then
+			local name = tostring(key)
+			if type(data.DisplayName) == "string" and data.DisplayName ~= "" then
+				name = data.DisplayName
+			end
+			table.insert(unitList, {
+				Key = key,
+				Name = name,
+				Rarity = data.Rarity,
+				Rank = rarityRank[data.Rarity] or 99,
+			})
+		end
+	end
+	table.sort(unitList, function(a, b)
+		if a.Rank ~= b.Rank then
+			return a.Rank < b.Rank
+		end
+		if a.Name ~= b.Name then
+			return a.Name < b.Name
+		end
+		return tostring(a.Key) < tostring(b.Key)
+	end)
+	local unitOptions, unitLabelToKey = {}, {}
+	for _, u in ipairs(unitList) do
+		local label = string.format("%s [%s]", u.Name, u.Rarity)
+		if unitLabelToKey[label] then
+			label = label .. " (" .. tostring(u.Key) .. ")"
+		end
+		table.insert(unitOptions, label)
+		unitLabelToKey[label] = u.Key
+	end
+	if #unitOptions == 0 then
+		unitOptions = { "(tiada data unit)" }
+	end
+
+	-- Ruby shop items
+	local rubyList = {}
+	local rubyItems = RubyConfig and RubyConfig.Items
+	if type(rubyItems) == "table" then
+		for key, item in pairs(rubyItems) do
+			if type(item) == "table" then
+				table.insert(rubyList, {
+					Key = key,
+					Name = (type(item.DisplayName) == "string" and item.DisplayName) or tostring(key),
+					Price = item.RubyPrice,
+					Order = (type(item.Order) == "number" and item.Order) or 99,
+				})
+			end
+		end
+	end
+	if #rubyList == 0 then
+		rubyList = {
+			{ Key = "EspadaCrate", Name = "Espada Crate", Price = 150000, Order = 1 },
+			{ Key = "FlameEnchant", Name = "Flame Enchant", Price = 10000, Order = 2 },
+			{ Key = "FrostEnchant", Name = "Frost Enchant", Price = 20000, Order = 3 },
+		}
+	end
+	table.sort(rubyList, function(a, b)
+		if a.Order ~= b.Order then
+			return a.Order < b.Order
+		end
+		return tostring(a.Key) < tostring(b.Key)
+	end)
+	local rubyOptions, rubyLabelToKey = {}, {}
+	for _, it in ipairs(rubyList) do
+		local label = it.Name
+		if type(it.Price) == "number" then
+			label = label .. " (" .. fmt(it.Price) .. ")"
+		end
+		table.insert(rubyOptions, label)
+		rubyLabelToKey[label] = it.Key
+	end
+
+	-- =====================================================
+	-- State
+	-- =====================================================
+	local S = {
+		alive = true,
+		rarities = {},
+		units = {},
+		autoBuy = false,
+		allStations = true,
+		autoStartRoll = true,
+		autoRollInterval = 5,
+		stationRange = 12,
+		playerRange = 60,
+		scanInterval = 0.2,
+		promptDelay = 0.1,
+		buyCooldown = 1.5,
+		returnBack = true,
+		autoWheel = false,
+		wheelInterval = 2,
+		autoRuby = false,
+		rubySelected = {},
+		rubyInterval = 3,
+	}
+
+	local function toList(v)
+		local list = {}
+		if type(v) == "string" then
+			list[1] = v
+		elseif type(v) == "table" then
+			for _, x in ipairs(v) do
+				if type(x) == "string" then
+					list[#list + 1] = x
+				end
+			end
+		end
+		return list
+	end
+
+	-- =====================================================
+	-- Cache character dalam workspace (padan nama dgn UnitConfig)
+	-- =====================================================
+	-- Unit dikira "match" kalau RARITY dia dipilih ATAU NAMA (key) dia dipilih
+	local function wants(unitKey, rarity)
+		return S.rarities[rarity] == true or S.units[unitKey] == true
+	end
+
+	local candidates = {}
+	local prompts = {}
+	local conns = {}
+
+	local function register(inst)
+		if inst:IsA("ProximityPrompt") then
+			prompts[inst] = true
+		elseif inst:IsA("Model") then
+			local info = unitByName[inst.Name]
+			if info and not Players:GetPlayerFromCharacter(inst) then
+				candidates[inst] = info
+			end
+		end
+	end
+
+	table.insert(conns, workspace.DescendantAdded:Connect(function(inst)
+		pcall(register, inst)
+	end))
+	table.insert(conns, workspace.DescendantRemoving:Connect(function(inst)
+		candidates[inst] = nil
+		prompts[inst] = nil
+	end))
+	task.spawn(function()
+		local n = 0
+		for _, inst in ipairs(workspace:GetDescendants()) do
+			if not S.alive then
+				return
+			end
+			pcall(register, inst)
+			n = n + 1
+			if n % 1500 == 0 then
+				task.wait()
+			end
+		end
+	end)
+
+	-- =====================================================
+	-- Posisi, Plot, Roll Station
+	-- =====================================================
+	local function flat(v)
+		return Vector3.new(v.X, 0, v.Z)
+	end
+
+	local function getHRP()
+		local char = player.Character
+		return char and char:FindFirstChild("HumanoidRootPart")
+	end
+
+	local function posOf(inst)
+		if inst:IsA("BasePart") then
+			return inst.Position
+		end
+		if inst:IsA("Model") then
+			local ok, cf = pcall(function()
+				return inst:GetPivot()
+			end)
+			if ok and cf then
+				return cf.Position
+			end
+		end
+		local part = inst:FindFirstChildWhichIsA("BasePart", true)
+		return part and part.Position or nil
+	end
+
+	-- workspace.PlotN.RollStations:GetChildren()[i]  ->  i = SlotIndex
+	local function getStations(plot)
+		local list = {}
+		local rs = plot:FindFirstChild("RollStations")
+		if not rs then
+			return list
+		end
+		for i, st in ipairs(rs:GetChildren()) do
+			local p = posOf(st)
+			if p then
+				list[#list + 1] = { Index = i, Pos = p, Inst = st }
+			end
+		end
+		return list
+	end
+
+	-- ---------- ProximityPrompt ----------
+	local BUY_WORDS = { "buy", "purchase", "claim", "recruit" }
+
+	local function promptPos(prompt)
+		local par = prompt.Parent
+		if not par then
+			return nil
+		end
+		if par:IsA("Attachment") then
+			return par.WorldPosition
+		end
+		return posOf(par)
+	end
+
+	-- Prompt yang TIDAK boleh disasarkan: apa-apa di bawah AutoRollButton
+	-- (contoh workspace.Plot1 ... Plot6 .AutoRollButton)
+	local function isExcluded(prompt)
+		return prompt:FindFirstAncestor("AutoRollButton") ~= nil
+	end
+
+	local function enabledPrompts(root)
+		local list = {}
+		if root then
+			for _, d in ipairs(root:GetDescendants()) do
+				if d:IsA("ProximityPrompt") and d.Enabled and not isExcluded(d) then
+					list[#list + 1] = d
+				end
+			end
+		end
+		return list
+	end
+
+	-- Kalau ada banyak prompt, utamakan yang teks dia macam "Buy / Purchase / Claim"
+	local function pickPrompt(list)
+		local first
+		for _, p in ipairs(list) do
+			local t = string.lower(tostring(p.ActionText) .. " " .. tostring(p.ObjectText))
+			for _, w in ipairs(BUY_WORDS) do
+				if string.find(t, w, 1, true) then
+					return p
+				end
+			end
+			first = first or p
+		end
+		return first
+	end
+
+	-- Cari prompt: 1) dalam model character  2) dalam roll station  3) prompt terdekat (<=12 studs)
+	local function findPrompt(model, stationInst, refPos)
+		local p = pickPrompt(enabledPrompts(model))
+		if p then
+			return p
+		end
+		p = pickPrompt(enabledPrompts(stationInst))
+		if p then
+			return p
+		end
+		local near = {}
+		for prompt in pairs(prompts) do
+			if prompt.Parent and prompt.Enabled and not isExcluded(prompt) then
+				local pp = promptPos(prompt)
+				if pp and (pp - refPos).Magnitude <= 12 then
+					near[#near + 1] = prompt
+				end
+			end
+		end
+		table.sort(near, function(a, b)
+			return (promptPos(a) - refPos).Magnitude < (promptPos(b) - refPos).Magnitude
+		end)
+		return pickPrompt(near)
+	end
+
+	local function triggerPrompt(prompt)
+		local oldHold = prompt.HoldDuration
+		pcall(function()
+			prompt.HoldDuration = 0
+		end)
+		local ok = false
+		if type(fireproximityprompt) == "function" then
+			ok = pcall(fireproximityprompt, prompt)
+		end
+		if not ok then
+			ok = pcall(function()
+				prompt:InputHoldBegin()
+				task.wait(0.05)
+				prompt:InputHoldEnd()
+			end)
+		end
+		pcall(function()
+			prompt.HoldDuration = oldHold
+		end)
+		return ok
+	end
+
+	local function teleportTo(hrp, pos)
+		pcall(function()
+			local look = hrp.CFrame.LookVector
+			hrp.CFrame = CFrame.new(pos, pos + Vector3.new(look.X, 0, look.Z))
+			hrp.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+		end)
+	end
+
+	-- Cache bounding box plot (GetBoundingBox mahal, jadi refresh tiap 5 saat sahaja)
+	local boundsCache = setmetatable({}, { __mode = "k" })
+	local function getBounds(plot)
+		local now = os.clock()
+		local c = boundsCache[plot]
+		if c and (now - c.at) < 5 then
+			return c.cf, c.size
+		end
+		local ok, cf, size = pcall(function()
+			return plot:GetBoundingBox()
+		end)
+		if ok and cf and size then
+			boundsCache[plot] = { cf = cf, size = size, at = now }
+			return cf, size
+		end
+		return nil, nil
+	end
+
+	-- Cari Plot (Plot1..N) yang player tengah berdiri / paling dekat
+	local function detectPlot(point)
+		local bestPlot, bestScore
+		for _, plot in ipairs(workspace:GetChildren()) do
+			if string.match(plot.Name, "^Plot%d+$") then
+				local dist, inside = nil, false
+				if plot:IsA("Model") then
+					local cf, size = getBounds(plot)
+					if cf and size then
+						local rel = cf:PointToObjectSpace(point)
+						inside = math.abs(rel.X) <= size.X / 2 and math.abs(rel.Z) <= size.Z / 2
+						dist = (flat(cf.Position) - flat(point)).Magnitude
+					end
+				end
+				if not dist then
+					for _, st in ipairs(getStations(plot)) do
+						local d = (flat(st.Pos) - flat(point)).Magnitude
+						if not dist or d < dist then
+							dist = d
+						end
+					end
+				end
+				if dist then
+					local score = dist + (inside and 0 or 100000)
+					if not bestScore or score < bestScore then
+						bestScore = score
+						bestPlot = plot
+					end
+				end
+			end
+		end
+		return bestPlot
+	end
+
+	-- Scan: plot player -> character di setiap roll station -> senarai Target (rarity match)
+	-- Target disusun dari yang paling dekat dengan player.
+	local function scan()
+		local hrp = getHRP()
+		if not hrp then
+			return nil, "Character player tiada"
+		end
+		local plot = detectPlot(hrp.Position)
+		if not plot then
+			return nil, "Plot tak jumpa"
+		end
+		local stations = getStations(plot)
+		local info = {
+			Plot = plot.Name,
+			Stations = #stations,
+			StationList = stations,
+			Occupants = {},
+			Targets = {},
+			AnyMatch = false,
+		}
+		if #stations == 0 then
+			return info
+		end
+
+		-- station paling dekat dengan player
+		local nearSt, nearD
+		for _, st in ipairs(stations) do
+			local d = (flat(st.Pos) - flat(hrp.Position)).Magnitude
+			if not nearD or d < nearD then
+				nearD, nearSt = d, st
+			end
+		end
+		info.Slot = nearSt.Index
+		info.StationDist = nearD
+
+		-- character yang berdiri di tiap station (character -> station terdekat dia)
+		for model, unit in pairs(candidates) do
+			if model.Parent then
+				local mp = posOf(model)
+				if mp then
+					local bestSt, bestD
+					for _, st in ipairs(stations) do
+						local d = (flat(st.Pos) - flat(mp)).Magnitude
+						if not bestD or d < bestD then
+							bestD, bestSt = d, st
+						end
+					end
+					if bestSt and bestD <= S.stationRange then
+						local cur = info.Occupants[bestSt.Index]
+						if not cur or bestD < cur.D then
+							info.Occupants[bestSt.Index] = {
+								Model = model,
+								UnitId = unit.Key,
+								Rarity = unit.Rarity,
+								D = bestD,
+								Pos = mp,
+							}
+						end
+					end
+				end
+			end
+		end
+
+		-- ada mana-mana unit (mana-mana station) yang match rarity?
+		for _, occ in pairs(info.Occupants) do
+			if wants(occ.UnitId, occ.Rarity) then
+				info.AnyMatch = true
+				break
+			end
+		end
+
+		if nearD > S.playerRange then
+			return info -- player jauh dari semua station, tiada target
+		end
+
+		local list = S.allStations and stations or { nearSt }
+		for _, st in ipairs(list) do
+			local occ = info.Occupants[st.Index]
+			if occ and wants(occ.UnitId, occ.Rarity) then
+				table.insert(info.Targets, {
+					Station = st,
+					Occ = occ,
+					ToPlayer = (flat(st.Pos) - flat(hrp.Position)).Magnitude,
+				})
+			end
+		end
+		table.sort(info.Targets, function(a, b)
+			return a.ToPlayer < b.ToPlayer
+		end)
+		return info
+	end
+
+	-- =====================================================
+	-- Aksi
+	-- =====================================================
+	local lastBuy = setmetatable({}, { __mode = "k" })
+
+	local lastNoPrompt = 0
+	local lastAutoRoll = 0
+	local MAX_TRIES = 3 -- cuba trigger max 3 kali kalau unit belum hilang
+	local VERIFY_WAIT = 0.4 -- tunggu max 0.4s selepas tiap trigger
+
+	local function isGone(model, prompt)
+		return (not model:IsDescendantOf(workspace))
+			or (not prompt:IsDescendantOf(workspace))
+			or (not prompt.Enabled)
+	end
+
+	-- Teleport ke prompt, trigger, sahkan unit hilang (kalau tidak, cuba lagi). Return true kalau berjaya.
+	local function processTarget(hrp, t)
+		local model = t.Occ.Model
+		if not model:IsDescendantOf(workspace) then
+			return true
+		end
+		local refPos = posOf(model) or t.Occ.Pos
+		local prompt = findPrompt(model, t.Station.Inst, refPos)
+		if not prompt then
+			local now = os.clock()
+			if now - lastNoPrompt > 10 then
+				lastNoPrompt = now
+				notify("Auto Buy", t.Occ.UnitId .. " jumpa tapi tiada ProximityPrompt aktif.", 5)
+			end
+			return false
+		end
+
+		local target = (promptPos(prompt) or refPos) + Vector3.new(0, 3, 0)
+		teleportTo(hrp, target)
+		task.wait(S.promptDelay)
+
+		for _ = 1, MAX_TRIES do
+			if not hrp.Parent or not S.alive then
+				return false
+			end
+			triggerPrompt(prompt)
+			local t0 = os.clock()
+			while os.clock() - t0 < VERIFY_WAIT do
+				if isGone(model, prompt) then
+					return true
+				end
+				task.wait(0.05)
+			end
+			teleportTo(hrp, target) -- mungkin tertolak, pastikan masih dekat
+		end
+		return isGone(model, prompt)
+	end
+
+	local function buyRolled()
+		local info = scan()
+		if not info then
+			return
+		end
+		if #info.Targets == 0 then
+			-- tiada target: start auto roll (hanya kalau memang tiada unit match di mana-mana station)
+			if S.autoStartRoll and info.Stations > 0 and not info.AnyMatch then
+				local now = os.clock()
+				if now - lastAutoRoll >= S.autoRollInterval then
+					lastAutoRoll = now
+					fire("RequestStartAutoRoll")
+				end
+			end
+			return
+		end
+		local hrp0 = getHRP()
+		if not hrp0 then
+			return
+		end
+		local origin = hrp0.CFrame
+		local moved = false
+
+		for _, t in ipairs(info.Targets) do
+			if not S.alive or not S.autoBuy then
+				break
+			end
+			local model = t.Occ.Model
+			local last = lastBuy[model]
+			if not last or (os.clock() - last) >= S.buyCooldown then
+				moved = true
+				local ok, res = pcall(processTarget, hrp0, t)
+				if not ok then
+					warn("[UnitHunter] processTarget error: " .. tostring(res))
+				end
+				if ok and res then
+					lastBuy[model] = os.clock()
+				else
+					lastBuy[model] = os.clock() + 3 -- gagal: rehat sekejap sebelum cuba lagi
+				end
+				if not hrp0.Parent then
+					return -- character mati / respawn
+				end
+			end
+		end
+
+		if moved and S.returnBack and hrp0.Parent then
+			teleportTo(hrp0, origin.Position)
+			pcall(function()
+				hrp0.CFrame = origin
+			end)
+		end
+	end
+
+	local function buyRuby()
+		for _, key in ipairs(S.rubySelected) do
+			if not S.alive or not S.autoRuby then
+				return
+			end
+			fire("RequestRubyShopBuy", { Item = key })
+			task.wait(0.15)
+		end
+	end
+
+	local function startLoop(name, flagName, intervalName, fn)
+		task.spawn(function()
+			while S.alive do
+				if S[flagName] then
+					local ok, err = pcall(fn)
+					if not ok then
+						warn("[UnitHunter] Loop " .. name .. " error: " .. tostring(err))
+					end
+				end
+				task.wait(math.max(0.1, tonumber(S[intervalName]) or 1))
+			end
+		end)
+	end
+
+	startLoop("AutoBuy", "autoBuy", "scanInterval", buyRolled)
+	startLoop("AutoWheel", "autoWheel", "wheelInterval", function()
+		fire("RequestWheelSpin")
+	end)
+	startLoop("AutoRuby", "autoRuby", "rubyInterval", buyRuby)
+
+	-- Anti AFK
+	local afkConn
+	local function setAntiAfk(on)
+		if on then
+			if afkConn then
+				return
+			end
+			afkConn = player.Idled:Connect(function()
+				pcall(function()
+					VirtualUser:CaptureController()
+					VirtualUser:ClickButton2(Vector2.new(0, 0))
+				end)
+			end)
+		elseif afkConn then
+			afkConn:Disconnect()
+			afkConn = nil
+		end
+	end
+
+	local function unload()
+		S.alive = false
+		S.autoBuy, S.autoWheel, S.autoRuby = false, false, false
+		for _, c in ipairs(conns) do
+			pcall(function()
+				c:Disconnect()
+			end)
+		end
+		setAntiAfk(false)
+		env.__UnitHunterOnCapture = nil
+		release()
+		pcall(function()
+			Rayfield:Destroy()
+		end)
+	end
+
+	-- =====================================================
+	-- UI
+	-- =====================================================
+	local canSave = type(writefile) == "function" and type(isfolder) == "function" and type(isfile) == "function"
+
+	local Window = Rayfield:CreateWindow({
+		Name = "Unit Hunter",
+		LoadingTitle = "Unit Hunter",
+		LoadingSubtitle = "Auto Buy | Wheel | Ruby Shop",
+		Theme = "Default",
+		ToggleUIKeybind = "K",
+		DisableRayfieldPrompts = true,
+		DisableBuildWarnings = true,
+		ConfigurationSaving = {
+			Enabled = canSave,
+			FolderName = "UnitHunter",
+			FileName = "Config",
+		},
+		Discord = { Enabled = false, Invite = "noinvitelink", RememberJoins = true },
+		KeySystem = false,
+	})
+
+	-- ---------- Tab 1 : Auto Buy ----------
+	local TabBuy = Window:CreateTab("Auto Buy", 4483362458)
+
+	TabBuy:CreateSection("Target (Rarity / Nama Unit)")
+
+	local defaultRarity = {}
+	if table.find(rarityOptions, "Cosmic") then
+		defaultRarity = { "Cosmic" }
+	end
+	for _, r in ipairs(defaultRarity) do
+		S.rarities[r] = true
+	end
+
+	TabBuy:CreateDropdown({
+		Name = "Pilih Rarity (boleh lebih satu)",
+		Options = rarityOptions,
+		CurrentOption = defaultRarity,
+		MultipleOptions = true,
+		Flag = "UH_Rarity",
+		Callback = function(value)
+			local set = {}
+			for _, r in ipairs(toList(value)) do
+				set[r] = true
+			end
+			S.rarities = set
+		end,
+	})
+
+	TabBuy:CreateDropdown({
+		Name = "Pilih Unit ikut nama (boleh lebih satu)",
+		Options = unitOptions,
+		CurrentOption = {},
+		MultipleOptions = true,
+		Flag = "UH_Units",
+		Callback = function(value)
+			local set = {}
+			for _, label in ipairs(toList(value)) do
+				local key = unitLabelToKey[label]
+				if key then
+					set[key] = true
+				end
+			end
+			S.units = set
+		end,
+	})
+
+	TabBuy:CreateLabel("Unit dibeli kalau rarity ATAU nama dia dipilih.")
+
+	TabBuy:CreateToggle({
+		Name = "Auto Buy Rolled Unit",
+		CurrentValue = false,
+		Flag = "UH_AutoBuy",
+		Callback = function(value)
+			S.autoBuy = value == true
+		end,
+	})
+
+	TabBuy:CreateToggle({
+		Name = "Semua station dalam plot (OFF = station terdekat sahaja)",
+		CurrentValue = true,
+		Flag = "UH_AllStations",
+		Callback = function(value)
+			S.allStations = value == true
+		end,
+	})
+
+	TabBuy:CreateToggle({
+		Name = "Balik ke posisi asal lepas beli",
+		CurrentValue = true,
+		Flag = "UH_ReturnBack",
+		Callback = function(value)
+			S.returnBack = value == true
+		end,
+	})
+
+	TabBuy:CreateToggle({
+		Name = "Start Auto Roll bila tiada target",
+		CurrentValue = true,
+		Flag = "UH_AutoStartRoll",
+		Callback = function(value)
+			S.autoStartRoll = value == true
+		end,
+	})
+
+	TabBuy:CreateSection("Tetapan")
+
+	TabBuy:CreateSlider({
+		Name = "Jarak max player ke roll station",
+		Range = { 5, 200 },
+		Increment = 1,
+		Suffix = " studs",
+		CurrentValue = 60,
+		Flag = "UH_PlayerRangeV2",
+		Callback = function(value)
+			S.playerRange = value
+		end,
+	})
+
+	TabBuy:CreateSlider({
+		Name = "Jarak max character ke roll station",
+		Range = { 4, 40 },
+		Increment = 1,
+		Suffix = " studs",
+		CurrentValue = 12,
+		Flag = "UH_StationRange",
+		Callback = function(value)
+			S.stationRange = value
+		end,
+	})
+
+	TabBuy:CreateSlider({
+		Name = "Scan interval",
+		Range = { 0.05, 2 },
+		Increment = 0.05,
+		Suffix = " s",
+		CurrentValue = 0.2,
+		Flag = "UH_ScanIntervalV2",
+		Callback = function(value)
+			S.scanInterval = value
+		end,
+	})
+
+	TabBuy:CreateSlider({
+		Name = "Delay lepas teleport (sebelum fire prompt)",
+		Range = { 0, 1 },
+		Increment = 0.05,
+		Suffix = " s",
+		CurrentValue = 0.1,
+		Flag = "UH_PromptDelayV2",
+		Callback = function(value)
+			S.promptDelay = value
+		end,
+	})
+
+	TabBuy:CreateSlider({
+		Name = "Cooldown beli per unit",
+		Range = { 0.5, 10 },
+		Increment = 0.5,
+		Suffix = " s",
+		CurrentValue = 1.5,
+		Flag = "UH_BuyCooldownV2",
+		Callback = function(value)
+			S.buyCooldown = value
+		end,
+	})
+
+	TabBuy:CreateSlider({
+		Name = "Interval Start Auto Roll",
+		Range = { 1, 30 },
+		Increment = 1,
+		Suffix = " s",
+		CurrentValue = 5,
+		Flag = "UH_AutoRollInterval",
+		Callback = function(value)
+			S.autoRollInterval = value
+		end,
+	})
+
+	TabBuy:CreateSection("Debug")
+
+	TabBuy:CreateButton({
+		Name = "Scan sekarang (semua station + prompt)",
+		Callback = function()
+			local info, err = scan()
+			if not info then
+				notify("Scan", err or "Gagal scan", 5)
+				return
+			end
+			if info.Stations == 0 then
+				notify("Scan", info.Plot .. " | tiada roll station dijumpai", 6)
+				return
+			end
+			local count = 0
+			for _ in pairs(candidates) do
+				count = count + 1
+			end
+			local lines = {
+				string.format(
+					"%s | Station: %d | Terdekat: slot %d (%.0f studs) | Cache: %d",
+					info.Plot, info.Stations, info.Slot, info.StationDist, count
+				),
+			}
+			if info.StationDist > S.playerRange then
+				lines[#lines + 1] = "Player terlalu jauh dari station"
+			end
+			for _, st in ipairs(info.StationList) do
+				local occ = info.Occupants[st.Index]
+				if occ then
+					local pr = findPrompt(occ.Model, st.Inst, occ.Pos)
+					local tag = wants(occ.UnitId, occ.Rarity) and "MATCH" or "tak match"
+					local ptxt = "TIADA prompt"
+					if pr then
+						ptxt = tostring(pr.ActionText)
+						print("[UnitHunter] Slot " .. st.Index .. " prompt: " .. pr:GetFullName())
+					end
+					lines[#lines + 1] = string.format(
+						"Slot %d: %s [%s] %s | %s",
+						st.Index, occ.UnitId, occ.Rarity, tag, ptxt
+					)
+				else
+					lines[#lines + 1] = string.format("Slot %d: kosong", st.Index)
+				end
+			end
+			if S.autoStartRoll and not info.AnyMatch then
+				lines[#lines + 1] = "Tiada unit match -> Start Auto Roll akan di-fire"
+			end
+			notify("Scan", table.concat(lines, "\n"), 10)
+		end,
+	})
+
+	-- ---------- Tab 2 : Misc ----------
+	local TabMisc = Window:CreateTab("Misc", 4483362458)
+
+	-- Section 1 : Auto Spin Wheel
+	TabMisc:CreateSection("Auto Spin Wheel")
+
+	TabMisc:CreateToggle({
+		Name = "Auto Spin Wheel",
+		CurrentValue = false,
+		Flag = "UH_AutoWheel",
+		Callback = function(value)
+			S.autoWheel = value == true
+		end,
+	})
+
+	TabMisc:CreateSlider({
+		Name = "Wheel spin interval",
+		Range = { 0.5, 10 },
+		Increment = 0.5,
+		Suffix = " s",
+		CurrentValue = 2,
+		Flag = "UH_WheelInterval",
+		Callback = function(value)
+			S.wheelInterval = value
+		end,
+	})
+
+	-- Section 2 : Auto Buy Ruby Shop
+	TabMisc:CreateSection("Auto Buy Ruby Shop")
+
+	TabMisc:CreateDropdown({
+		Name = "Pilih item (boleh lebih satu)",
+		Options = rubyOptions,
+		CurrentOption = {},
+		MultipleOptions = true,
+		Flag = "UH_RubyItems",
+		Callback = function(value)
+			local keys = {}
+			for _, label in ipairs(toList(value)) do
+				local key = rubyLabelToKey[label]
+				if key then
+					keys[#keys + 1] = key
+				end
+			end
+			S.rubySelected = keys
+		end,
+	})
+
+	TabMisc:CreateToggle({
+		Name = "Auto Buy Ruby Shop",
+		CurrentValue = false,
+		Flag = "UH_AutoRuby",
+		Callback = function(value)
+			S.autoRuby = value == true
+		end,
+	})
+
+	TabMisc:CreateSlider({
+		Name = "Ruby shop buy interval",
+		Range = { 1, 30 },
+		Increment = 1,
+		Suffix = " s",
+		CurrentValue = 3,
+		Flag = "UH_RubyInterval",
+		Callback = function(value)
+			S.rubyInterval = value
+		end,
+	})
+
+	-- Section 3 : QoL
+	TabMisc:CreateSection("QoL")
+
+	setAntiAfk(true)
+	TabMisc:CreateToggle({
+		Name = "Anti AFK",
+		CurrentValue = true,
+		Flag = "UH_AntiAFK",
+		Callback = function(value)
+			setAntiAfk(value == true)
+		end,
+	})
+
+	TabMisc:CreateButton({
+		Name = "Lihat Replica ID (Wheel/Ruby/Auto Roll)",
+		Callback = function()
+			notify(
+				"Replica ID",
+				string.format(
+					"Wheel: %s | Ruby: %s | AutoRoll: %s",
+					tostring(ids.RequestWheelSpin),
+					tostring(ids.RequestRubyShopBuy),
+					tostring(ids.RequestStartAutoRoll)
+				),
+				6
+			)
+		end,
+	})
+
+	TabMisc:CreateButton({
+		Name = "Unload script",
+		Callback = unload,
+	})
+
+	if canSave then
+		pcall(function()
+			Rayfield:LoadConfiguration()
+		end)
+	end
+
+	if not env.__UnitHunterHooked then
+		notify(
+			"Info",
+			"Executor tak support hookmetamethod. Replica ID (Wheel/Ruby/Auto Roll) guna nilai default (15 / 34).",
+			8
+		)
+	else
+		notify("Unit Hunter", "Siap. Kalau Wheel/Ruby/Auto Roll tak jalan, buat sekali action tu secara manual untuk tangkap Replica ID.", 6)
+	end
+end
+
+local ok, err = pcall(main)
+if not ok then
+	release()
+	warn("[UnitHunter] Error: " .. tostring(err))
+end
